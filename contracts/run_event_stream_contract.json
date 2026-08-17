@@ -68,7 +68,8 @@
     "middleware": "Middleware state-change audit evidence.",
     "context": "Identity-only evidence about effective hidden context.",
     "subagent": "Subagent lifecycle and persisted step evidence.",
-    "workspace": "Run-scoped workspace and output file-change evidence."
+    "workspace": "Run-scoped workspace and output file-change evidence.",
+    "evolution": "Bounded, redacted post-run evidence for skill evolution."
   },
   "events": [
     {
@@ -387,6 +388,139 @@
             },
             "additionalProperties": true
           }
+        },
+        "additionalProperties": true
+      }
+    },
+    {
+      "event_type": "skill_evolution.trace",
+      "category": "evolution",
+      "producer": "runtime.runs.worker._persist_evolution_trace_snapshot() when skill_evolution.enabled=true",
+      "content_schema": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "snapshot_hash",
+          "run_id",
+          "thread_id",
+          "user_id",
+          "model_name",
+          "run_status",
+          "stop_reason",
+          "task_input",
+          "final_answer",
+          "tool_events",
+          "skill_events",
+          "user_corrections",
+          "artifacts",
+          "environment",
+          "source_event_count",
+          "included_event_count",
+          "truncated",
+          "created_at"
+        ],
+        "properties": {
+          "schema_version": {"const": "deerflow.skill-evolution.trace-snapshot.v1"},
+          "snapshot_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "run_id": {"type": "string", "minLength": 1},
+          "thread_id": {"type": "string", "minLength": 1},
+          "user_id": {"type": "string", "minLength": 1},
+          "model_name": {"type": ["string", "null"]},
+          "run_status": {
+            "enum": ["success", "error", "timeout", "interrupted"]
+          },
+          "stop_reason": {"type": ["string", "null"]},
+          "task_input": {"type": "string", "maxLength": 8000},
+          "final_answer": {"type": "string", "maxLength": 12000},
+          "tool_events": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {
+              "type": "object",
+              "required": [
+                "sequence",
+                "tool_call_id",
+                "tool_name",
+                "arguments",
+                "result",
+                "status",
+                "error_type",
+                "result_truncated"
+              ],
+              "properties": {
+                "sequence": {"type": "integer", "minimum": 0},
+                "tool_call_id": {"type": "string", "minLength": 1},
+                "tool_name": {"type": "string", "minLength": 1},
+                "arguments": {"type": "string", "maxLength": 16000},
+                "result": {"type": "string", "maxLength": 32000},
+                "status": {"enum": ["success", "error", "unknown"]},
+                "error_type": {"type": ["string", "null"]},
+                "result_truncated": {"type": "boolean"}
+              },
+              "additionalProperties": false
+            }
+          },
+          "skill_events": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "type": "object",
+              "required": [
+                "skill_name",
+                "skill_path",
+                "content_hash",
+                "activation_source",
+                "category"
+              ],
+              "properties": {
+                "skill_name": {"type": "string", "minLength": 1},
+                "skill_path": {"type": "string", "minLength": 1},
+                "content_hash": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "activation_source": {"enum": ["slash", "read"]},
+                "category": {"type": ["string", "null"]}
+              },
+              "additionalProperties": false
+            }
+          },
+          "user_corrections": {
+            "type": "array",
+            "maxItems": 16,
+            "items": {"type": "string", "maxLength": 4000}
+          },
+          "artifacts": {
+            "type": "array",
+            "maxItems": 256,
+            "items": {"type": "string", "minLength": 1, "maxLength": 1024}
+          },
+          "environment": {
+            "type": "object",
+            "required": ["os", "shell", "runtime", "metadata"],
+            "properties": {
+              "os": {"type": "string", "minLength": 1},
+              "shell": {"type": ["string", "null"]},
+              "runtime": {"type": ["string", "null"]},
+              "metadata": {"type": "object"}
+            },
+            "additionalProperties": false
+          },
+          "source_event_count": {"type": "integer", "minimum": 0},
+          "included_event_count": {"type": "integer", "minimum": 0},
+          "truncated": {"type": "boolean"},
+          "created_at": {"type": "string", "format": "date-time"}
+        },
+        "additionalProperties": false
+      },
+      "metadata_schema": {
+        "type": "object",
+        "required": ["schema_version", "snapshot_hash"],
+        "properties": {
+          "schema_version": {
+            "const": "deerflow.skill-evolution.trace-snapshot.v1"
+          },
+          "snapshot_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
         },
         "additionalProperties": true
       }

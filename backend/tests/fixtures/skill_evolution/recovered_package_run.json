@@ -1,0 +1,112 @@
+{
+  "snapshot": {
+    "schema_version": "deerflow.skill-evolution.trace-snapshot.v1",
+    "snapshot_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "run_id": "run-recovered",
+    "thread_id": "thread-1",
+    "user_id": "user-1",
+    "model_name": "test-model",
+    "run_status": "success",
+    "stop_reason": null,
+    "task_input": "Install package with [redacted] and verify the import.",
+    "final_answer": "The package is installed and all focused tests pass.",
+    "tool_events": [
+      {
+        "sequence": 1,
+        "tool_call_id": "call-global-install",
+        "tool_name": "bash",
+        "arguments": "{\"command\":\"pip install package\"}",
+        "result": "Permission denied",
+        "status": "error",
+        "error_type": "permission",
+        "result_truncated": false
+      },
+      {
+        "sequence": 2,
+        "tool_call_id": "call-inspect",
+        "tool_name": "read_file",
+        "arguments": "{\"path\":\"/mnt/user-data/workspace/pyproject.toml\"}",
+        "result": "[project]\\nname = \"demo\"",
+        "status": "success",
+        "error_type": null,
+        "result_truncated": false
+      },
+      {
+        "sequence": 3,
+        "tool_call_id": "call-local-install",
+        "tool_name": "bash",
+        "arguments": "{\"command\":\"uv add package\"}",
+        "result": "Resolved and installed package",
+        "status": "success",
+        "error_type": null,
+        "result_truncated": false
+      },
+      {
+        "sequence": 4,
+        "tool_call_id": "call-write",
+        "tool_name": "write_file",
+        "arguments": "{\"path\":\"/mnt/user-data/workspace/check.py\",\"content\":\"import package\"}",
+        "result": "Successfully wrote check.py",
+        "status": "success",
+        "error_type": null,
+        "result_truncated": false
+      },
+      {
+        "sequence": 5,
+        "tool_call_id": "call-import",
+        "tool_name": "bash",
+        "arguments": "{\"command\":\"uv run python /mnt/user-data/workspace/check.py\"}",
+        "result": "(no output)",
+        "status": "success",
+        "error_type": null,
+        "result_truncated": false
+      },
+      {
+        "sequence": 6,
+        "tool_call_id": "call-tests",
+        "tool_name": "bash",
+        "arguments": "{\"command\":\"uv run pytest tests/test_package.py -q\"}",
+        "result": "7 passed",
+        "status": "success",
+        "error_type": null,
+        "result_truncated": false
+      }
+    ],
+    "skill_events": [],
+    "user_corrections": [
+      "Use the project environment instead of the global interpreter."
+    ],
+    "artifacts": [
+      "/mnt/user-data/workspace/check.py",
+      "/mnt/user-data/outputs/report.json"
+    ],
+    "environment": {
+      "os": "macos",
+      "shell": "zsh",
+      "runtime": "python3.12",
+      "metadata": {}
+    },
+    "source_event_count": 18,
+    "included_event_count": 18,
+    "truncated": false,
+    "created_at": "2026-08-16T00:00:18Z"
+  },
+  "outcome": {
+    "status": "success",
+    "confidence": 0.95,
+    "sources": [
+      "test_command:call-tests"
+    ],
+    "checks": [
+      {
+        "source": "test_command:call-tests",
+        "passed": true,
+        "detail": "Focused tests passed.",
+        "confidence": 0.95,
+        "authoritative": true,
+        "priority": 80
+      }
+    ],
+    "final_reward": null
+  }
+}

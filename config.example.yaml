@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 33
+config_version: 40
 
 # ============================================================================
 # Logging
@@ -1825,10 +1825,45 @@ agents_api:
 # Skill Self-Evolution Configuration
 # ============================================================================
 # Allow the agent to autonomously create and improve skills in skills/custom/.
+# Enabled runs also retain one bounded, redacted skill_evolution.trace event.
 skill_evolution:
   enabled: false # Set to true to allow agent-managed writes under skills/custom
   moderation_model_name: null # Model for LLM-based security scanning (null = use default model)
+  extraction_model_name: null # Structured event extraction model (null = use default model)
+  distillation_model_name: null # Cross-trajectory proposal model (null = use default model)
   security_fail_closed: true # Moderation model unavailable: true blocks all writes; false allows non-executable content with a warning (executable is always blocked)
+  evidence:
+    min_success_confidence: 0.8 # Minimum verified-success confidence for admission
+    min_cluster_events: 3 # Minimum confirmed events required for readiness
+    min_distinct_runs: 3 # A repeated run cannot satisfy the readiness threshold
+    max_events_per_cluster: 20 # Bound confirmation and later distillation input
+    tool_call_complexity_threshold: 5 # Tool count that independently qualifies complexity
+    accept_recovered_errors: true # Accept an error followed by a successful tool path
+    accept_user_corrections: true # Accept an effective user correction
+    accept_explicit_remember_requests: true # Accept explicit remember/create-skill requests
+    accept_non_trivial_workflow: true # Accept a trusted extractor's non-trivial workflow flag
+  grouping:
+    deterministic_threshold: 0.65 # Minimum fingerprint score for candidate grouping
+    semantic_threshold: 0.82 # Minimum cosine similarity for semantic candidates
+    semantic_top_k: 16 # Maximum semantic candidates returned per event
+    llm_confirmation: true # Require strict same-workflow confirmation before readiness
+    confirmation_model_name: null # Null selects the primary configured model
+    embedding:
+      enabled: false # Optional; deterministic retrieval remains available when disabled
+      provider: ollama
+      base_url: http://127.0.0.1:11434
+      model_name: null # Required when enabled, for example nomic-embed-text
+      model_version: null # Null resolves and stores the immutable Ollama model digest
+      timeout_seconds: 30
+    vector_store:
+      provider: qdrant
+      url: http://127.0.0.1:6333
+      collection_name: deerflow_skill_evolution_events
+      api_key_env: QDRANT_API_KEY # Optional environment variable; unset is valid for local Qdrant
+      timeout_seconds: 10
+  quality:
+    min_source_replay_success_rate: 1.0 # Every source task must pass with the candidate
+    min_held_out_success_rate: 0.8 # Reject source-only overfitting below this held-out rate
 
 # ============================================================================
 # Checkpointer Configuration (DEPRECATED — use `database` instead)

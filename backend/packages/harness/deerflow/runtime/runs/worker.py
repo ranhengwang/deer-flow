@@ -20,6 +20,7 @@ import copy
 import inspect
 import logging
 import os
+import platform
 import sys
 import threading
 import weakref
@@ -28,6 +29,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
+from pathlib import Path
 from typing import Any, Literal, cast
 
 from langgraph.checkpoint.base import empty_checkpoint
@@ -36,6 +38,7 @@ from langgraph.types import Overwrite
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
 from deerflow.config.app_config import AppConfig
 from deerflow.config.database_config import CheckpointChannelMode
+from deerflow.config.paths import get_paths
 from deerflow.constants import TOOL_RESULTS_DIRNAME
 from deerflow.runtime.checkpoint_mode import (
     aensure_checkpoint_mode_compatible,
@@ -49,6 +52,7 @@ from deerflow.runtime.checkpoint_state import (
     graph_writable_channels,
 )
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
+from deerflow.runtime.events.catalog import EVOLUTION_TRACE_EVENT
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
     DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS,
@@ -68,10 +72,19 @@ from deerflow.runtime.goal import (
     visible_conversation_signature,
     write_thread_goal,
 )
+from deerflow.runtime.secret_context import (
+    extract_request_secrets,
+    read_active_secrets,
+)
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 from deerflow.runtime.stream_modes import normalize_stream_modes, to_langgraph_stream_modes
 from deerflow.runtime.user_context import get_effective_user_id, resolve_runtime_user_id
+from deerflow.skill_evolution.models import EvolutionTraceSnapshot, TraceRunStatus
+from deerflow.skill_evolution.trajectory import (
+    RedactionSpec,
+    build_evolution_trace_snapshot,
+)
 from deerflow.trace_context import (
     DEERFLOW_TRACE_METADATA_KEY,
     is_trace_id_from_request_header,
@@ -112,6 +125,7 @@ async def _checkpoint_thread_lock(thread_id: str) -> AsyncIterator[None]:
 
 _DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS = (0.1, 0.5)
 _EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS = 3.0
+_EVOLUTION_SOURCE_EVENT_LIMIT = 10_000
 
 
 async def _persist_delivery_receipt(
@@ -160,6 +174,134 @@ async def _persist_delivery_receipt(
             await asyncio.sleep(delay)
 
     return False  # pragma: no cover - loop always returns
+
+
+def _skill_evolution_enabled(app_config: AppConfig | None) -> bool:
+    evolution_config = getattr(app_config, "skill_evolution", None)
+    return bool(getattr(evolution_config, "enabled", False))
+
+
+def _evolution_user_id(
+    record: RunRecord,
+    runtime_context: Any,
+) -> str:
+    if record.user_id:
+        return record.user_id
+    if isinstance(runtime_context, dict):
+        context_user_id = runtime_context.get("user_id")
+        if isinstance(context_user_id, str) and context_user_id:
+            return context_user_id
+    return get_effective_user_id()
+
+
+def _evolution_redaction_spec(
+    *,
+    thread_id: str,
+    user_id: str,
+    runtime_context: Any,
+) -> RedactionSpec:
+    request_secrets = extract_request_secrets(runtime_context)
+    active_secrets = read_active_secrets(runtime_context)
+    secret_values = {
+        *request_secrets.values(),
+        *active_secrets.values(),
+    }
+    if isinstance(runtime_context, dict):
+        github_token = runtime_context.get("github_token")
+        if isinstance(github_token, str) and github_token:
+            secret_values.add(github_token)
+
+    paths = get_paths()
+    path_mappings = {
+        str(
+            paths.sandbox_work_dir(
+                thread_id,
+                user_id=user_id,
+            )
+        ): "/mnt/user-data/workspace",
+        str(
+            paths.sandbox_uploads_dir(
+                thread_id,
+                user_id=user_id,
+            )
+        ): "/mnt/user-data/uploads",
+        str(
+            paths.sandbox_outputs_dir(
+                thread_id,
+                user_id=user_id,
+            )
+        ): "/mnt/user-data/outputs",
+        str(paths.public_skills_view_dir): "/mnt/skills/public",
+        str(paths.user_custom_skills_view_dir(user_id)): "/mnt/skills/custom",
+        str(paths.user_legacy_skills_view_dir(user_id)): "/mnt/skills/legacy",
+        str(paths.user_integration_skills_view_dir(user_id)): "/mnt/skills/integrations",
+    }
+    return RedactionSpec(
+        secret_values=tuple(
+            sorted(
+                secret_values,
+                key=lambda value: (-len(value), value),
+            )
+        ),
+        path_mappings=path_mappings,
+    )
+
+
+def _evolution_environment() -> dict[str, str | None]:
+    shell = os.environ.get("SHELL")
+    return {
+        "os": platform.system() or sys.platform,
+        "shell": Path(shell).name if shell else None,
+        "runtime": f"python{platform.python_version()}",
+    }
+
+
+async def _persist_evolution_trace_snapshot(
+    *,
+    event_store: Any,
+    record: RunRecord,
+    runtime_context: Any,
+) -> tuple[EvolutionTraceSnapshot, bool] | None:
+    """Build and idempotently persist one terminal trace snapshot."""
+    try:
+        run_status = TraceRunStatus(record.status.value)
+    except ValueError:
+        return None
+
+    events = await event_store.list_events(
+        record.thread_id,
+        record.run_id,
+        limit=_EVOLUTION_SOURCE_EVENT_LIMIT,
+    )
+    user_id = _evolution_user_id(record, runtime_context)
+    snapshot = build_evolution_trace_snapshot(
+        events,
+        run_id=record.run_id,
+        thread_id=record.thread_id,
+        user_id=user_id,
+        model_name=record.model_name,
+        run_status=run_status,
+        stop_reason=record.stop_reason,
+        environment=_evolution_environment(),
+        redaction=_evolution_redaction_spec(
+            thread_id=record.thread_id,
+            user_id=user_id,
+            runtime_context=runtime_context,
+        ),
+    )
+    persisted, created = await event_store.put_if_absent(
+        thread_id=record.thread_id,
+        run_id=record.run_id,
+        event_type=EVOLUTION_TRACE_EVENT.event_type,
+        category=EVOLUTION_TRACE_EVENT.category,
+        content=snapshot.model_dump(mode="json"),
+        metadata={
+            "schema_version": snapshot.schema_version,
+            "snapshot_hash": snapshot.snapshot_hash,
+        },
+    )
+    persisted_snapshot = EvolutionTraceSnapshot.model_validate(persisted["content"])
+    return persisted_snapshot, created
 
 
 _DELIVERY_INCOMPLETE_ERROR = "Artifact delivery incomplete: no produced output artifact was presented"
@@ -592,6 +734,7 @@ async def run_agent(
     accessor: CheckpointStateAccessor | None = None
     rollback_point: RollbackPoint | None = None
     journal = None
+    runtime_ctx: dict[str, Any] | None = None
     delivery_content: dict[str, Any] | None = None
     produced_output_paths: list[str] | None = None
     # Journal construction moved ahead of preflight so every terminal run can
@@ -1206,6 +1349,20 @@ async def run_agent(
                         await run_manager.persist_current_status(run_id)
             except Exception:
                 logger.warning("Failed to persist terminal status for run %s after delivery receipt attempts", run_id, exc_info=True)
+
+        if not record.ownership_lost and event_store is not None and _skill_evolution_enabled(ctx.app_config):
+            try:
+                await _persist_evolution_trace_snapshot(
+                    event_store=event_store,
+                    record=record,
+                    runtime_context=(runtime_ctx if runtime_ctx is not None else config.get("context")),
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to persist evolution trace snapshot for run %s (non-fatal)",
+                    run_id,
+                    exc_info=True,
+                )
 
         if not record.ownership_lost and journal is not None and persist_completion:
             try:

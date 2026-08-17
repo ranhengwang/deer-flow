@@ -171,6 +171,17 @@ def test_version_26_config_upgrades_to_checkpoint_channel_mode(tmp_path, caplog)
     assert upgraded["database"]["checkpoint_channel_mode"] == "full"
     assert upgraded["database"]["backend"] == "sqlite"
     assert upgraded["database"]["sqlite_dir"] == "custom-data"
+    assert upgraded["skill_evolution"]["extraction_model_name"] is None
+    assert upgraded["skill_evolution"]["distillation_model_name"] is None
+    assert upgraded["skill_evolution"]["evidence"]["min_success_confidence"] == 0.8
+    assert upgraded["skill_evolution"]["evidence"]["min_cluster_events"] == 3
+    assert upgraded["skill_evolution"]["evidence"]["min_distinct_runs"] == 3
+    assert upgraded["skill_evolution"]["evidence"]["tool_call_complexity_threshold"] == 5
+    assert upgraded["skill_evolution"]["grouping"]["deterministic_threshold"] == 0.65
+    assert upgraded["skill_evolution"]["grouping"]["semantic_threshold"] == 0.82
+    assert upgraded["skill_evolution"]["grouping"]["llm_confirmation"] is True
+    assert upgraded["skill_evolution"]["grouping"]["embedding"]["enabled"] is False
+    assert upgraded["skill_evolution"]["grouping"]["vector_store"]["provider"] == "qdrant"
 
 
 def _load_repo_example() -> dict:
@@ -196,6 +207,84 @@ def test_security_fail_closed_bumped_config_version():
     example = _load_repo_example()
     assert example.get("config_version", 0) >= 27
     assert example["skill_evolution"]["security_fail_closed"] is True
+
+
+def test_evidence_eligibility_bumped_config_version():
+    """Eligibility settings must be present in config version 34+."""
+    example = _load_repo_example()
+    evidence = example["skill_evolution"]["evidence"]
+
+    assert example.get("config_version", 0) >= 34
+    assert evidence["min_success_confidence"] == 0.8
+    assert evidence["tool_call_complexity_threshold"] == 5
+    assert evidence["accept_recovered_errors"] is True
+    assert evidence["accept_user_corrections"] is True
+    assert evidence["accept_explicit_remember_requests"] is True
+    assert evidence["accept_non_trivial_workflow"] is True
+
+
+def test_structured_extraction_bumped_config_version():
+    """Extraction model selection must ship in config version 35+."""
+    example = _load_repo_example()
+
+    assert example.get("config_version", 0) >= 35
+    assert example["skill_evolution"]["extraction_model_name"] is None
+
+
+def test_deterministic_grouping_bumped_config_version():
+    """Grouping threshold must ship in config version 36+."""
+    example = _load_repo_example()
+
+    assert example.get("config_version", 0) >= 36
+    assert example["skill_evolution"]["grouping"]["deterministic_threshold"] == 0.65
+
+
+def test_semantic_retrieval_bumped_config_version():
+    """Optional embedding and Qdrant settings must ship in config version 37+."""
+    example = _load_repo_example()
+    grouping = example["skill_evolution"]["grouping"]
+
+    assert example.get("config_version", 0) >= 37
+    assert grouping["semantic_threshold"] == 0.82
+    assert grouping["semantic_top_k"] == 16
+    assert grouping["embedding"]["enabled"] is False
+    assert grouping["embedding"]["provider"] == "ollama"
+    assert grouping["embedding"]["model_name"] is None
+    assert grouping["vector_store"]["provider"] == "qdrant"
+    assert grouping["vector_store"]["url"] == "http://127.0.0.1:6333"
+
+
+def test_cluster_confirmation_bumped_config_version():
+    """K=3 readiness and confirmation settings must ship in config version 38+."""
+    example = _load_repo_example()
+    skill_evolution = example["skill_evolution"]
+    evidence = skill_evolution["evidence"]
+    grouping = skill_evolution["grouping"]
+
+    assert example.get("config_version", 0) >= 38
+    assert evidence["min_cluster_events"] == 3
+    assert evidence["min_distinct_runs"] == 3
+    assert evidence["max_events_per_cluster"] == 20
+    assert grouping["llm_confirmation"] is True
+    assert grouping["confirmation_model_name"] is None
+
+
+def test_new_skill_distillation_bumped_config_version():
+    """Distillation model selection must ship in config version 39+."""
+    example = _load_repo_example()
+
+    assert example.get("config_version", 0) >= 39
+    assert example["skill_evolution"]["distillation_model_name"] is None
+
+
+def test_new_skill_evaluation_bumped_config_version():
+    """Source and held-out pass thresholds must ship in config version 40+."""
+    example = _load_repo_example()
+    quality = example["skill_evolution"]["quality"]
+
+    assert example.get("config_version", 0) >= 40
+    assert quality["min_source_replay_success_rate"] == 1.0
+    assert quality["min_held_out_success_rate"] == 0.8
 
 
 def test_version_26_config_reported_outdated_against_example(caplog):
