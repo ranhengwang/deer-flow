@@ -734,7 +734,7 @@ def test_non_openai_provider_does_not_receive_stream_usage_default(monkeypatch):
 
 
 def test_ollama_reasoning_is_disabled_when_thinking_is_disabled(monkeypatch):
-    from langchain_ollama import ChatOllama
+    ChatOllama = pytest.importorskip("langchain_ollama").ChatOllama
 
     model = ModelConfig(
         name="ollama-reasoning",
