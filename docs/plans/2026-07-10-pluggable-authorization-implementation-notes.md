@@ -349,6 +349,62 @@ Phase 1 最低验证要求：
 - **延期：** Skills、Sandbox 权限（Phase 3 后续 PR）；前端 effective-permissions 展示；
   management route 的 provider 迁移。
 
+### 2026-08-17 — Skill evolution read authorization
+
+- **背景：** Phase 9.1 adds persisted EvolutionEvent, Cluster, Proposal, Evaluation,
+  and publication-version reads. Reusing `runs:read` would let a run-history role
+  inspect a distinct evidence and Skill-change domain.
+- **决策：** Register `skill_evolution:read` as an independent route permission and
+  require it on all `/api/skill-evolution/*` GET routes. It participates in the
+  existing async per-permission provider evaluation and fail-open/fail-closed rules.
+- **决策：** Route permission, owner scope, and admin scope remain separate checks.
+  The authenticated user is the default Store partition. A different `user_id`
+  requires the existing hard-coded admin gate, and admin does not bypass
+  `skill_evolution:read`.
+- **兼容性：** `authorization.enabled: false` now grants the seven registered
+  permissions, preserving access for authenticated legacy deployments. With
+  authorization enabled, an explicit route allowlist that omits
+  `skill_evolution:read` denies the endpoints.
+- **证据：** Route tests cover disabled behavior, provider request shape, per-item
+  failure policy, explicit RBAC allowlists, `runs:read`-only denial, owner isolation,
+  and admin cross-user reads. API tests also prove cross-user denial occurs before
+  Store access.
+- **延期：** Phase 9.2 write permissions and CSRF-protected approval, publication,
+  and rollback routes.
+
+### 2026-08-17 — Skill evolution write authorization
+
+- **背景：** Phase 9.2 introduces explicit review, publication, and rollback HTTP
+  operations. Reusing `skill_evolution:read` or one broad write permission would
+  prevent operators from separating reviewers, publishers, and rollback operators.
+- **决策：** Register independent `skill_evolution:review`,
+  `skill_evolution:publish`, and `skill_evolution:rollback` route permissions.
+  Provider requests retain `resource="route"` with actions `review`, `publish`, and
+  `rollback` and the complete permission as target.
+- **决策：** Permission, owner scope, admin scope, and CSRF remain independent
+  checks. An ordinary caller may mutate only its own per-user Skill evolution
+  records. Supplying another `user_id` requires the existing hard-coded admin gate;
+  admin status does not bypass the route permission. The shared Gateway CSRF
+  middleware protects all three POST routes.
+- **决策：** Reviewer and rollback actor IDs plus decision times come only from the
+  authenticated request/server clock. Request models forbid client actor/time
+  fields. Publication and rollback delegate to the lifespan-scoped
+  `SkillPublicationService`, preserving the shared `SkillMutationService` lock,
+  SkillScan/moderation, package hash CAS, history, and rollback snapshot boundaries.
+- **兼容性：** `authorization.enabled: false` grants all ten registered
+  permissions to authenticated callers, preserving the existing disabled-provider
+  behavior while owner isolation still prevents cross-user mutation. Enabled RBAC
+  route allowlists must explicitly include each desired operation.
+- **证据：** Tests cover dedicated permission denial, owner/admin separation, CSRF
+  rejection before Store/service access, server-owned actors/times, forbidden audit
+  fields, compact responses, internal-error redaction, lifecycle singleton wiring,
+  and provider request shape.
+- **否决方案：** Do not make every operation admin-only: evolution data and custom
+  Skills are per-user resources, and the existing owner/admin contract already
+  provides the required boundary. Do not expose raw service errors because scanner
+  or package-conflict details may contain sensitive content.
+- **延期：** Frontend review UI and audit-log query surface.
+
 ### 新记录模板
 
 ```markdown

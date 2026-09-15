@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0012_skill_evolution"
+HEAD = "0016_direct_skill_publication"
 BASELINE = "0001_baseline"
 
 

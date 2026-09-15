@@ -259,7 +259,11 @@ def _response_content(response: Any) -> Any:
     raise StructuredExtractionError("model response does not contain JSON text")
 
 
-def _parse_output(response: Any) -> StructuredExtractionOutput:
+def _parse_output(
+    response: Any,
+    *,
+    event_kind: EvolutionEventKind,
+) -> StructuredExtractionOutput:
     content = _response_content(response)
     if isinstance(content, StructuredExtractionOutput):
         return content
@@ -272,6 +276,13 @@ def _parse_output(response: Any) -> StructuredExtractionOutput:
             raise StructuredExtractionError("model response is not strict JSON") from exc
     if not isinstance(payload, dict):
         raise StructuredExtractionError("model response must be a JSON object")
+    if event_kind is EvolutionEventKind.new_skill_evidence:
+        payload = {
+            **payload,
+            "candidate_target": None,
+            "candidate_target_evidence_segment_ids": [],
+            "skill_gaps": [],
+        }
     try:
         return StructuredExtractionOutput.model_validate(payload)
     except ValidationError as exc:
@@ -290,6 +301,31 @@ def _all_evidence_groups(
     if output.candidate_target_evidence_segment_ids:
         groups.append(output.candidate_target_evidence_segment_ids)
     return groups
+
+
+def _discard_unverified_optional_claims(
+    extraction: DeterministicExtraction,
+    output: StructuredExtractionOutput,
+) -> StructuredExtractionOutput:
+    segments = {segment.segment_id: segment for segment in extraction.candidate_segments}
+
+    def has_known_evidence(evidence_ids: list[str]) -> bool:
+        return all(evidence_id in segments for evidence_id in evidence_ids)
+
+    failed_attempts = [
+        attempt
+        for attempt in output.failed_attempts
+        if has_known_evidence(attempt.evidence_segment_ids) and any(segments[evidence_id].kind is CandidateSegmentKind.tool and segments[evidence_id].tool_status == "error" for evidence_id in attempt.evidence_segment_ids)
+    ]
+    user_corrections = [
+        correction for correction in output.user_corrections if has_known_evidence(correction.evidence_segment_ids) and any(segments[evidence_id].kind is CandidateSegmentKind.correction for evidence_id in correction.evidence_segment_ids)
+    ]
+    return output.model_copy(
+        update={
+            "failed_attempts": failed_attempts,
+            "user_corrections": user_corrections,
+        }
+    )
 
 
 def _validate_semantics(
@@ -595,7 +631,14 @@ class StructuredEvolutionExtractor:
                     messages,
                     config=invoke_config,
                 )
-                output = _parse_output(response)
+                output = _parse_output(
+                    response,
+                    event_kind=extraction.event_kind,
+                )
+                output = _discard_unverified_optional_claims(
+                    extraction,
+                    output,
+                )
                 _validate_semantics(extraction, output)
                 return _build_event(
                     extraction,

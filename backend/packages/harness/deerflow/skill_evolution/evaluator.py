@@ -20,7 +20,12 @@ from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal, Protocol, Self, runtime_checkable
 
-from pydantic import Field, StringConstraints, model_validator
+from pydantic import (
+    ConfigDict,
+    Field,
+    StringConstraints,
+    model_validator,
+)
 
 from deerflow.config.skill_evolution_config import (
     SkillEvolutionQualityConfig,
@@ -37,12 +42,24 @@ from deerflow.skill_evolution.models import (
     OutcomeStatus,
     ProposalOperation,
     ProposalStatus,
+    ProposalStatusSource,
+    ProposalStatusTransition,
     Sha256,
     ShortText,
     SkillEvaluation,
+    SkillName,
     SkillProposal,
     TaskEvaluationResult,
     TraceRunStatus,
+)
+from deerflow.skill_evolution.observability import (
+    EvolutionObservability,
+    get_evolution_observability,
+    observe_evaluation,
+)
+from deerflow.skill_evolution.quality import (
+    SKILL_QUALITY_FORMULA_VERSION,
+    apply_skill_quality,
 )
 from deerflow.skill_evolution.store.base import (
     EvolutionStoreConflict,
@@ -52,11 +69,54 @@ from deerflow.skill_evolution.store.base import (
 
 REPLAY_TASK_SCHEMA_VERSION = "deerflow.skill-evolution.replay-task.v1"
 REPLAY_FIXTURE_SCHEMA_VERSION = "deerflow.skill-evolution.replay-fixture.v1"
-NEW_SKILL_EVALUATOR_VERSION = "new-skill-evaluator-v1"
+NEW_SKILL_EVALUATOR_VERSION = "new-skill-evaluator-v2"
+PATCH_SKILL_EVALUATOR_VERSION = "patch-skill-evaluator-v2"
 _MAX_FIXTURE_FILES = 128
 _MAX_FIXTURE_FILE_BYTES = 4 * 1024 * 1024
 _MAX_FIXTURE_TOTAL_BYTES = 16 * 1024 * 1024
+_MAX_RESULT_ARTIFACTS = 128
 _SECRET_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_PROPOSAL_COMPARISON_EXCLUDE = {
+    "status",
+    "status_history",
+}
+
+
+def _evaluation_started_transition(
+    evaluation_id: str,
+) -> ProposalStatusTransition:
+    return ProposalStatusTransition(
+        from_status=ProposalStatus.staged,
+        to_status=ProposalStatus.validating,
+        source=ProposalStatusSource.evaluator,
+        reason_code="evaluation_started",
+        reason=f"Evaluation {evaluation_id} started.",
+        occurred_at=datetime.now(UTC),
+        evaluation_id=evaluation_id,
+    )
+
+
+def _evaluation_rejected_transition(
+    evaluation: SkillEvaluation,
+) -> ProposalStatusTransition:
+    details = "; ".join(
+        f"{key}={value}"
+        for key, value in sorted(
+            evaluation.safety_results.items(),
+        )
+    )
+    reason = f"Evaluation {evaluation.evaluation_id} rejected the candidate."
+    if details:
+        reason = f"{reason} {details}"
+    return ProposalStatusTransition(
+        from_status=ProposalStatus.validating,
+        to_status=ProposalStatus.rejected,
+        source=ProposalStatusSource.evaluator,
+        reason_code="evaluation_rejected",
+        reason=reason[:2_000],
+        occurred_at=evaluation.created_at,
+        evaluation_id=evaluation.evaluation_id,
+    )
 
 
 class Replayability(StrEnum):
@@ -496,6 +556,189 @@ class ReplayWorkspacePaths(EvolutionModel):
     skills: Path
 
 
+class ReplaySkillFile(EvolutionModel):
+    """Replay file whose content preserves leading/trailing bytes."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        allow_inf_nan=False,
+        str_strip_whitespace=False,
+    )
+
+    path: Annotated[
+        str,
+        StringConstraints(
+            min_length=1,
+            max_length=1_024,
+        ),
+    ]
+    content: Annotated[
+        str,
+        StringConstraints(
+            min_length=1,
+            max_length=262_144,
+        ),
+    ]
+    executable: bool = False
+
+    @model_validator(mode="after")
+    def _validate_path(self) -> Self:
+        normalized = _normalize_relative_path(self.path)
+        if normalized != self.path.replace("\\", "/"):
+            raise ValueError("replay Skill file path must already be normalized")
+        return self
+
+
+class ReplaySkillPackage(EvolutionModel):
+    """Complete read-only Skill package used by one replay condition."""
+
+    user_id: Identifier
+    skill_name: SkillName
+    skill_md_hash: Sha256
+    files: list[ReplaySkillFile] = Field(
+        min_length=1,
+        max_length=128,
+    )
+    complete: bool = True
+    omitted_paths: list[
+        Annotated[
+            str,
+            StringConstraints(
+                strip_whitespace=True,
+                min_length=1,
+                max_length=1_024,
+            ),
+        ]
+    ] = Field(
+        default_factory=list,
+        max_length=128,
+    )
+
+    @model_validator(mode="after")
+    def _validate_package(self) -> Self:
+        paths = [item.path for item in self.files]
+        if len(set(paths)) != len(paths):
+            raise ValueError("replay Skill package paths must be unique")
+        skill_md = next(
+            (item for item in self.files if item.path == "SKILL.md"),
+            None,
+        )
+        if skill_md is None:
+            raise ValueError("replay Skill package requires SKILL.md")
+        if _sha256_text(skill_md.content) != self.skill_md_hash:
+            raise ValueError("replay Skill package hash does not match SKILL.md")
+        omitted = [_normalize_relative_path(path) for path in self.omitted_paths]
+        if omitted != sorted(set(omitted)):
+            raise ValueError("replay Skill omitted paths must be sorted and unique")
+        if set(paths) & set(omitted):
+            raise ValueError("replay Skill path cannot be both present and omitted")
+        if self.complete and omitted:
+            raise ValueError("complete replay Skill package cannot omit paths")
+        return self
+
+
+def build_replay_skill_package(
+    *,
+    user_id: str,
+    skill_name: str,
+    files: Mapping[str, str],
+    executable_paths: set[str] | None = None,
+    complete: bool = True,
+    omitted_paths: list[str] | None = None,
+) -> ReplaySkillPackage:
+    """Build a validated, deterministic replay-only Skill package."""
+    normalized_files: dict[str, str] = {}
+    for path, content in files.items():
+        normalized = _normalize_relative_path(path)
+        if normalized in normalized_files:
+            raise ValueError("replay Skill package paths must be unique")
+        normalized_files[normalized] = content
+    if "SKILL.md" not in normalized_files:
+        raise ValueError("replay Skill package requires SKILL.md")
+    executable = {_normalize_relative_path(path) for path in (executable_paths or set())}
+    if not executable <= set(normalized_files):
+        raise ValueError("executable paths must exist in replay Skill package")
+    records = [
+        ReplaySkillFile(
+            path=path,
+            content=content,
+            executable=path in executable,
+        )
+        for path, content in sorted(normalized_files.items())
+    ]
+    omitted = sorted({_normalize_relative_path(path) for path in (omitted_paths or [])})
+    return ReplaySkillPackage(
+        user_id=user_id,
+        skill_name=skill_name,
+        skill_md_hash=_sha256_text(normalized_files["SKILL.md"]),
+        files=records,
+        complete=complete,
+        omitted_paths=omitted,
+    )
+
+
+def _package_from_create_proposal(
+    proposal: SkillProposal,
+) -> ReplaySkillPackage:
+    if proposal.operation is not ProposalOperation.create:
+        raise ValueError("direct Proposal replay requires a create proposal")
+    skill_md = next(
+        (item for item in proposal.proposed_files if item.path == "SKILL.md"),
+        None,
+    )
+    if skill_md is None:
+        raise ValueError("create proposal requires SKILL.md")
+    return ReplaySkillPackage(
+        user_id=proposal.user_id,
+        skill_name=proposal.skill_name,
+        skill_md_hash=_sha256_text(skill_md.content),
+        files=[
+            ReplaySkillFile(
+                path=item.path,
+                content=item.content,
+                executable=item.executable,
+            )
+            for item in proposal.proposed_files
+        ],
+    )
+
+
+def build_patch_candidate_skill_package(
+    base_skill: ReplaySkillPackage,
+    proposal: SkillProposal,
+) -> ReplaySkillPackage:
+    """Apply a Patch Proposal's complete rendered files over its base package."""
+    if proposal.operation is not ProposalOperation.patch:
+        raise ValueError("candidate package requires a patch proposal")
+    if proposal.user_id != base_skill.user_id:
+        raise ValueError("base Skill package user does not match proposal")
+    if proposal.skill_name != base_skill.skill_name:
+        raise ValueError("base Skill package name does not match proposal")
+    if proposal.base_skill_hash != base_skill.skill_md_hash:
+        raise ValueError("base Skill hash does not match proposal")
+    merged = {item.path: item for item in base_skill.files}
+    for item in proposal.proposed_files:
+        merged[item.path] = ReplaySkillFile(
+            path=item.path,
+            content=item.content,
+            executable=item.executable,
+        )
+    skill_md = merged.get("SKILL.md")
+    if skill_md is None:
+        raise ValueError("patch candidate package requires SKILL.md")
+    replaced_paths = {item.path for item in proposal.proposed_files}
+    remaining_omitted = [path for path in base_skill.omitted_paths if path not in replaced_paths]
+    return ReplaySkillPackage(
+        user_id=base_skill.user_id,
+        skill_name=base_skill.skill_name,
+        skill_md_hash=_sha256_text(skill_md.content),
+        files=[merged[path] for path in sorted(merged)],
+        complete=base_skill.complete,
+        omitted_paths=remaining_omitted,
+    )
+
+
 class ReplaySideEffectReport(EvolutionModel):
     changed_paths: list[str] = Field(max_length=10_000)
     violations: list[str] = Field(max_length=10_000)
@@ -536,8 +779,12 @@ def _scan_files(root: Path) -> dict[str, tuple[str, int]]:
 def _materialize_replay_workspace(
     spec: ReplayTaskSpec,
     proposal: SkillProposal | None,
+    skill_package: ReplaySkillPackage | None,
     parent_dir: Path | None,
 ) -> tuple[ReplayWorkspacePaths, dict[str, tuple[str, int]]]:
+    if proposal is not None and skill_package is not None:
+        raise ValueError("replay accepts either a proposal or a Skill package")
+    resolved_package = skill_package
     if proposal is not None:
         if proposal.user_id != spec.user_id:
             raise ValueError("proposal user does not match replay task")
@@ -546,6 +793,11 @@ def _materialize_replay_workspace(
             ProposalStatus.validating,
         }:
             raise ValueError("only staged or validating proposals can be replayed")
+        resolved_package = _package_from_create_proposal(
+            proposal,
+        )
+    if resolved_package is not None and resolved_package.user_id != spec.user_id:
+        raise ValueError("replay Skill package user does not match task")
     if parent_dir is not None:
         parent_dir.mkdir(parents=True, exist_ok=True)
     root = Path(
@@ -571,10 +823,10 @@ def _materialize_replay_workspace(
             )
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(fixture_file.decode_content())
-        if proposal is not None:
-            skill_root = paths.skills / proposal.skill_name
+        if resolved_package is not None:
+            skill_root = paths.skills / resolved_package.skill_name
             skill_root.mkdir(parents=True)
-            for proposed_file in proposal.proposed_files:
+            for proposed_file in resolved_package.files:
                 target = _safe_join(
                     skill_root,
                     proposed_file.path,
@@ -584,7 +836,7 @@ def _materialize_replay_workspace(
                     proposed_file.content,
                     encoding="utf-8",
                 )
-                target.chmod(0o444)
+                target.chmod(0o555 if proposed_file.executable else 0o444)
         return paths, _scan_files(root)
     except Exception:
         _cleanup_replay_workspace(root)
@@ -644,6 +896,7 @@ async def isolated_replay_workspace(
     spec: ReplayTaskSpec,
     *,
     proposal: SkillProposal | None = None,
+    skill_package: ReplaySkillPackage | None = None,
     parent_dir: str | Path | None = None,
 ) -> AsyncIterator[ReplayWorkspace]:
     """Materialize an isolated replay tree and always remove it."""
@@ -651,6 +904,7 @@ async def isolated_replay_workspace(
         _materialize_replay_workspace,
         spec,
         proposal,
+        skill_package,
         Path(parent_dir) if parent_dir is not None else None,
     )
     workspace = ReplayWorkspace(
@@ -669,11 +923,13 @@ async def isolated_replay_workspace(
 
 ReplayCondition = Literal[
     "no_skill",
+    "base_skill",
     "candidate_skill",
 ]
 ReplaySplit = Literal[
     "source",
     "held_out",
+    "regression",
 ]
 
 
@@ -729,12 +985,40 @@ class ReplayCommandExecution(EvolutionModel):
         return self
 
 
+@dataclass(slots=True)
+class ReplayAgentProgress:
+    """Latest cumulative execution metrics observed before completion."""
+
+    _latest: ReplayAgentExecution | None = None
+
+    def update(
+        self,
+        execution: ReplayAgentExecution,
+    ) -> None:
+        self._latest = execution.model_copy(deep=True)
+
+    def snapshot(self) -> ReplayAgentExecution | None:
+        if self._latest is None:
+            return None
+        return self._latest.model_copy(deep=True)
+
+
 @dataclass(frozen=True, slots=True)
 class ReplayAgentRequest:
     spec: ReplayTaskSpec
     paths: ReplayWorkspacePaths
     condition: ReplayCondition
-    candidate_skill_path: Path | None
+    active_skill_path: Path | None
+    progress: ReplayAgentProgress = field(
+        default_factory=ReplayAgentProgress,
+        compare=False,
+    )
+
+    @property
+    def candidate_skill_path(self) -> Path | None:
+        if self.condition != "candidate_skill":
+            return None
+        return self.active_skill_path
 
 
 @dataclass(frozen=True, slots=True)
@@ -911,6 +1195,7 @@ def _evaluation_id(
 ) -> str:
     payload = {
         "evaluator_version": NEW_SKILL_EVALUATOR_VERSION,
+        "quality_formula_version": SKILL_QUALITY_FORMULA_VERSION,
         "proposal_id": proposal.proposal_id,
         "source_tasks": [task.task_id for task in source_tasks],
         "held_out_tasks": [task.task_id for task in held_out_tasks],
@@ -973,6 +1258,129 @@ def _validate_new_skill_suite(
         raise ValueError("all replay tasks must belong to the proposal user")
 
 
+async def _run_replay_task(
+    runtime: ReplayRuntime,
+    spec: ReplayTaskSpec,
+    *,
+    split: ReplaySplit,
+    condition: ReplayCondition,
+    skill_package: ReplaySkillPackage | None,
+    parent_dir: Path | None,
+) -> TaskEvaluationResult:
+    async with isolated_replay_workspace(
+        spec,
+        skill_package=skill_package,
+        parent_dir=parent_dir,
+    ) as workspace:
+        active_skill_path = workspace.paths.skills / skill_package.skill_name if skill_package is not None else None
+        request = ReplayAgentRequest(
+            spec=spec,
+            paths=workspace.paths,
+            condition=condition,
+            active_skill_path=active_skill_path,
+        )
+        execution: ReplayAgentExecution | None = None
+        errors: list[str] = []
+        started = time.perf_counter()
+        try:
+            async with asyncio.timeout(spec.timeout_seconds):
+                execution = await runtime.run_agent(
+                    request,
+                )
+        except TimeoutError:
+            errors.append("agent_timeout")
+            execution = request.progress.snapshot()
+        except Exception as exc:
+            errors.append(f"agent_runtime_error:{type(exc).__name__}")
+            execution = request.progress.snapshot()
+        latency_seconds = time.perf_counter() - started
+        if execution is not None:
+            errors.extend(execution.errors)
+
+        artifacts: dict[str, EvaluationArtifact] = {}
+        for verifier in spec.verifiers:
+            if isinstance(verifier, ReplayCommandVerifier):
+                command_request = ReplayCommandRequest(
+                    spec=spec,
+                    paths=workspace.paths,
+                    condition=condition,
+                    command=verifier.command,
+                    timeout_seconds=verifier.timeout_seconds,
+                )
+                try:
+                    async with asyncio.timeout(verifier.timeout_seconds):
+                        command_result = await runtime.run_command(
+                            command_request,
+                        )
+                except TimeoutError:
+                    errors.append("command_verifier_timeout")
+                except Exception as exc:
+                    errors.append(f"command_runtime_error:{type(exc).__name__}")
+                else:
+                    errors.extend(command_result.errors)
+                    if command_result.exit_code != verifier.expected_exit_code:
+                        errors.append("command_exit_code_mismatch")
+            else:
+                passed, error, artifact = await _evaluate_artifact_verifier(
+                    workspace.paths,
+                    verifier,
+                )
+                artifacts[artifact.path] = artifact
+                if not passed and error is not None:
+                    errors.append(error)
+
+        side_effects = await workspace.audit_side_effects()
+        if not side_effects.within_policy:
+            errors.append("side_effect_policy_violation")
+        for path in side_effects.changed_paths:
+            if len(artifacts) >= _MAX_RESULT_ARTIFACTS and path not in artifacts:
+                continue
+            artifact = await _artifact_from_changed_path(
+                workspace.paths,
+                path,
+            )
+            if artifact is not None:
+                artifacts[artifact.path] = artifact
+
+        bounded_errors = _dedupe_bounded(errors)
+        return TaskEvaluationResult(
+            task_id=spec.task_id,
+            split=split,
+            condition=condition,
+            success=not bounded_errors,
+            metrics=EvaluationMetrics(
+                tool_calls=(execution.tool_calls if execution is not None else 0),
+                input_tokens=(execution.input_tokens if execution is not None else 0),
+                output_tokens=(execution.output_tokens if execution is not None else 0),
+                latency_seconds=latency_seconds,
+            ),
+            failure_reason=(bounded_errors[0] if bounded_errors else None),
+            errors=bounded_errors,
+            artifacts=[artifacts[path] for path in sorted(artifacts)],
+            environment_fingerprint=_sha256_text(_stable_json(spec.environment.model_dump(mode="json"))),
+        )
+
+
+async def run_replay_task(
+    runtime: ReplayRuntime,
+    spec: ReplayTaskSpec,
+    *,
+    split: ReplaySplit,
+    condition: ReplayCondition,
+    skill_package: ReplaySkillPackage | None,
+    parent_dir: str | Path | None = None,
+) -> TaskEvaluationResult:
+    """Execute one public replay task through the shared evaluator path."""
+    return await _run_replay_task(
+        runtime,
+        spec,
+        split=split,
+        condition=condition,
+        skill_package=skill_package,
+        parent_dir=(Path(parent_dir) if parent_dir is not None else None),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class NewSkillProposalEvaluator:
     """Runs paired candidate/no-Skill replays for one create Proposal."""
@@ -980,6 +1388,11 @@ class NewSkillProposalEvaluator:
     runtime: ReplayRuntime
     quality_config: SkillEvolutionQualityConfig = field(
         default_factory=SkillEvolutionQualityConfig,
+    )
+    observability: EvolutionObservability = field(
+        default_factory=get_evolution_observability,
+        repr=False,
+        compare=False,
     )
 
     async def _run_task(
@@ -991,95 +1404,15 @@ class NewSkillProposalEvaluator:
         condition: ReplayCondition,
         parent_dir: Path | None,
     ) -> TaskEvaluationResult:
-        candidate = proposal if condition == "candidate_skill" else None
-        async with isolated_replay_workspace(
+        skill_package = _package_from_create_proposal(proposal) if condition == "candidate_skill" else None
+        return await _run_replay_task(
+            self.runtime,
             spec,
-            proposal=candidate,
+            split=split,
+            condition=condition,
+            skill_package=skill_package,
             parent_dir=parent_dir,
-        ) as workspace:
-            candidate_skill_path = workspace.paths.skills / proposal.skill_name if candidate is not None else None
-            request = ReplayAgentRequest(
-                spec=spec,
-                paths=workspace.paths,
-                condition=condition,
-                candidate_skill_path=candidate_skill_path,
-            )
-            execution: ReplayAgentExecution | None = None
-            errors: list[str] = []
-            started = time.perf_counter()
-            try:
-                async with asyncio.timeout(spec.timeout_seconds):
-                    execution = await self.runtime.run_agent(
-                        request,
-                    )
-            except TimeoutError:
-                errors.append("agent_timeout")
-            except Exception as exc:
-                errors.append(f"agent_runtime_error:{type(exc).__name__}")
-            latency_seconds = time.perf_counter() - started
-            if execution is not None:
-                errors.extend(execution.errors)
-
-            artifacts: dict[str, EvaluationArtifact] = {}
-            for verifier in spec.verifiers:
-                if isinstance(verifier, ReplayCommandVerifier):
-                    command_request = ReplayCommandRequest(
-                        spec=spec,
-                        paths=workspace.paths,
-                        condition=condition,
-                        command=verifier.command,
-                        timeout_seconds=verifier.timeout_seconds,
-                    )
-                    try:
-                        async with asyncio.timeout(verifier.timeout_seconds):
-                            command_result = await self.runtime.run_command(
-                                command_request,
-                            )
-                    except TimeoutError:
-                        errors.append("command_verifier_timeout")
-                    except Exception as exc:
-                        errors.append(f"command_runtime_error:{type(exc).__name__}")
-                    else:
-                        errors.extend(command_result.errors)
-                        if command_result.exit_code != verifier.expected_exit_code:
-                            errors.append("command_exit_code_mismatch")
-                else:
-                    passed, error, artifact = await _evaluate_artifact_verifier(
-                        workspace.paths,
-                        verifier,
-                    )
-                    artifacts[artifact.path] = artifact
-                    if not passed and error is not None:
-                        errors.append(error)
-
-            side_effects = await workspace.audit_side_effects()
-            if not side_effects.within_policy:
-                errors.append("side_effect_policy_violation")
-            for path in side_effects.changed_paths:
-                artifact = await _artifact_from_changed_path(
-                    workspace.paths,
-                    path,
-                )
-                if artifact is not None:
-                    artifacts[artifact.path] = artifact
-
-            bounded_errors = _dedupe_bounded(errors)
-            success = not bounded_errors
-            return TaskEvaluationResult(
-                task_id=spec.task_id,
-                split=split,
-                condition=condition,
-                success=success,
-                metrics=EvaluationMetrics(
-                    tool_calls=(execution.tool_calls if execution is not None else 0),
-                    input_tokens=(execution.input_tokens if execution is not None else 0),
-                    output_tokens=(execution.output_tokens if execution is not None else 0),
-                    latency_seconds=latency_seconds,
-                ),
-                failure_reason=(bounded_errors[0] if bounded_errors else None),
-                errors=bounded_errors,
-                artifacts=[artifacts[path] for path in sorted(artifacts)],
-            )
+        )
 
     async def evaluate(
         self,
@@ -1107,22 +1440,24 @@ class NewSkillProposalEvaluator:
         ]
         blocked = [task for task in all_tasks if task.replayability is Replayability.manual_review]
         if blocked:
-            return SkillEvaluation(
-                evaluation_id=evaluation_id,
-                proposal_id=proposal.proposal_id,
-                user_id=proposal.user_id,
-                source_replay_results=[],
-                held_out_results=[],
-                baseline_results=[],
-                candidate_results=[],
-                regression_results=[],
-                safety_results={
-                    "replayability": "manual_review_required",
-                    "quality_score": "deferred_phase_6_4",
-                },
-                quality_score=0.0,
-                decision=EvaluationDecision.manual_review,
-                created_at=datetime.now(UTC),
+            return apply_skill_quality(
+                SkillEvaluation(
+                    evaluation_id=evaluation_id,
+                    proposal_id=proposal.proposal_id,
+                    user_id=proposal.user_id,
+                    source_replay_results=[],
+                    held_out_results=[],
+                    baseline_results=[],
+                    candidate_results=[],
+                    regression_results=[],
+                    safety_results={
+                        "replayability": "manual_review_required",
+                    },
+                    quality_score=0.0,
+                    decision=EvaluationDecision.manual_review,
+                    created_at=datetime.now(UTC),
+                ),
+                config=self.quality_config,
             )
 
         resolved_parent = Path(parent_dir) if parent_dir is not None else None
@@ -1165,37 +1500,39 @@ class NewSkillProposalEvaluator:
                 *candidate_results,
             ]
         )
-        if not held_out_tasks:
-            decision = EvaluationDecision.manual_review
-        elif side_effect_violation:
+        if side_effect_violation:
             decision = EvaluationDecision.reject
+        elif source_rate < self.quality_config.min_source_replay_success_rate or (held_out_tasks and held_out_rate < self.quality_config.min_held_out_success_rate):
+            decision = EvaluationDecision.reject
+        elif not held_out_tasks:
+            decision = EvaluationDecision.manual_review
         elif proposal.requires_manual_review:
             decision = EvaluationDecision.manual_review
-        elif source_rate < self.quality_config.min_source_replay_success_rate or held_out_rate < self.quality_config.min_held_out_success_rate:
-            decision = EvaluationDecision.reject
         else:
             decision = EvaluationDecision.approve
         safety_results: dict[str, ShortText] = {
             "source_replay": (f"{sum(result.success for result in source_results)}/{len(source_results)}"),
             "held_out": (f"{sum(result.success for result in held_out_results)}/{len(held_out_results)}" if held_out_results else "missing"),
             "side_effects": ("violation" if side_effect_violation else "allow"),
-            "quality_score": "deferred_phase_6_4",
         }
         if proposal.requires_manual_review:
             safety_results["proposal_review"] = "manual_review_required"
-        return SkillEvaluation(
-            evaluation_id=evaluation_id,
-            proposal_id=proposal.proposal_id,
-            user_id=proposal.user_id,
-            source_replay_results=source_results,
-            held_out_results=held_out_results,
-            baseline_results=baseline_results,
-            candidate_results=candidate_results,
-            regression_results=[],
-            safety_results=safety_results,
-            quality_score=0.0,
-            decision=decision,
-            created_at=datetime.now(UTC),
+        return apply_skill_quality(
+            SkillEvaluation(
+                evaluation_id=evaluation_id,
+                proposal_id=proposal.proposal_id,
+                user_id=proposal.user_id,
+                source_replay_results=source_results,
+                held_out_results=held_out_results,
+                baseline_results=baseline_results,
+                candidate_results=candidate_results,
+                regression_results=[],
+                safety_results=safety_results,
+                quality_score=0.0,
+                decision=decision,
+                created_at=datetime.now(UTC),
+            ),
+            config=self.quality_config,
         )
 
     async def evaluate_and_persist(
@@ -1227,11 +1564,11 @@ class NewSkillProposalEvaluator:
             raise ValueError("proposal must be persisted before evaluation")
         provided_payload = proposal.model_dump(
             mode="json",
-            exclude={"status"},
+            exclude=_PROPOSAL_COMPARISON_EXCLUDE,
         )
         stored_payload = stored.model_dump(
             mode="json",
-            exclude={"status"},
+            exclude=_PROPOSAL_COMPARISON_EXCLUDE,
         )
         if provided_payload != stored_payload:
             raise ValueError("persisted proposal does not match evaluation input")
@@ -1247,6 +1584,9 @@ class NewSkillProposalEvaluator:
                     proposal_id=stored.proposal_id,
                     expected_status=ProposalStatus.staged,
                     new_status=ProposalStatus.validating,
+                    transition=_evaluation_started_transition(
+                        evaluation_id,
+                    ),
                 )
             except EvolutionStoreConflict:
                 refreshed = await store.get_proposal(
@@ -1265,6 +1605,7 @@ class NewSkillProposalEvaluator:
                 await self._reject_validating_proposal(
                     store,
                     stored,
+                    existing,
                 )
             return PutResult(existing, created=False)
 
@@ -1293,6 +1634,13 @@ class NewSkillProposalEvaluator:
             await self._reject_validating_proposal(
                 store,
                 stored,
+                put_result.value,
+            )
+        if put_result.created:
+            observe_evaluation(
+                self.observability,
+                put_result.value,
+                skill_name=stored.skill_name,
             )
         return put_result
 
@@ -1300,6 +1648,7 @@ class NewSkillProposalEvaluator:
         self,
         store: SkillEvolutionStore,
         proposal: SkillProposal,
+        evaluation: SkillEvaluation,
     ) -> None:
         current = await store.get_proposal(
             proposal.user_id,
@@ -1315,6 +1664,380 @@ class NewSkillProposalEvaluator:
                 proposal_id=current.proposal_id,
                 expected_status=ProposalStatus.validating,
                 new_status=ProposalStatus.rejected,
+                transition=_evaluation_rejected_transition(
+                    evaluation,
+                ),
+            )
+        except EvolutionStoreConflict:
+            refreshed = await store.get_proposal(
+                current.user_id,
+                current.proposal_id,
+            )
+            if refreshed is None or refreshed.status is not ProposalStatus.rejected:
+                raise
+
+
+def _patch_evaluation_id(
+    proposal: SkillProposal,
+    base_skill: ReplaySkillPackage,
+    source_tasks: list[ReplayTaskSpec],
+    regression_tasks: list[ReplayTaskSpec],
+    quality_config: SkillEvolutionQualityConfig,
+) -> str:
+    payload = {
+        "evaluator_version": PATCH_SKILL_EVALUATOR_VERSION,
+        "quality_formula_version": SKILL_QUALITY_FORMULA_VERSION,
+        "proposal_id": proposal.proposal_id,
+        "base_skill_hash": base_skill.skill_md_hash,
+        "source_tasks": [task.task_id for task in source_tasks],
+        "regression_tasks": [task.task_id for task in regression_tasks],
+        "quality": quality_config.model_dump(mode="json"),
+    }
+    return f"evaluation-{_sha256_text(_stable_json(payload))[:32]}"
+
+
+def _validate_patch_skill_suite(
+    proposal: SkillProposal,
+    base_skill: ReplaySkillPackage,
+    source_tasks: list[ReplayTaskSpec],
+    regression_tasks: list[ReplayTaskSpec],
+) -> ReplaySkillPackage:
+    if proposal.operation is not ProposalOperation.patch:
+        raise ValueError("existing-Skill evaluation requires a patch proposal")
+    if proposal.status not in {
+        ProposalStatus.staged,
+        ProposalStatus.validating,
+    }:
+        raise ValueError("existing-Skill evaluation requires a staged or validating proposal")
+    candidate = build_patch_candidate_skill_package(
+        base_skill,
+        proposal,
+    )
+    source_event_ids = [task.source_event_id for task in source_tasks]
+    if len(set(source_event_ids)) != len(source_event_ids):
+        raise ValueError("source replay tasks must be unique by source event")
+    if set(source_event_ids) != set(proposal.supporting_event_ids):
+        raise ValueError("source replay tasks must cover every proposal supporting events")
+    source_families = {task.task_family for task in source_tasks}
+    if len(source_families) != 1:
+        raise ValueError("source replay tasks must share one task family")
+    regression_event_ids = [task.source_event_id for task in regression_tasks]
+    if len(set(regression_event_ids)) != len(regression_event_ids):
+        raise ValueError("regression replay tasks must be unique by source event")
+    if set(source_event_ids) & set(regression_event_ids):
+        raise ValueError("source and regression replay tasks must be independent")
+    all_tasks = [
+        *source_tasks,
+        *regression_tasks,
+    ]
+    task_ids = [task.task_id for task in all_tasks]
+    if len(set(task_ids)) != len(task_ids):
+        raise ValueError("replay task IDs must be unique across the evaluation suite")
+    if any(task.user_id != proposal.user_id for task in all_tasks):
+        raise ValueError("all replay tasks must belong to the proposal user")
+    return candidate
+
+
+@dataclass(frozen=True, slots=True)
+class PatchSkillProposalEvaluator:
+    """Runs paired base/candidate replays for one Patch Proposal."""
+
+    runtime: ReplayRuntime
+    quality_config: SkillEvolutionQualityConfig = field(
+        default_factory=SkillEvolutionQualityConfig,
+    )
+    observability: EvolutionObservability = field(
+        default_factory=get_evolution_observability,
+        repr=False,
+        compare=False,
+    )
+
+    async def evaluate(
+        self,
+        proposal: SkillProposal,
+        *,
+        base_skill: ReplaySkillPackage,
+        source_tasks: list[ReplayTaskSpec],
+        regression_tasks: list[ReplayTaskSpec],
+        parent_dir: str | Path | None = None,
+    ) -> SkillEvaluation:
+        """Run source and historical regression pairs without publishing."""
+        candidate_skill = _validate_patch_skill_suite(
+            proposal,
+            base_skill,
+            source_tasks,
+            regression_tasks,
+        )
+        evaluation_id = _patch_evaluation_id(
+            proposal,
+            base_skill,
+            source_tasks,
+            regression_tasks,
+            self.quality_config,
+        )
+        all_tasks = [
+            *source_tasks,
+            *regression_tasks,
+        ]
+        safety_results: dict[str, ShortText] = {
+            "base_skill_hash": base_skill.skill_md_hash,
+        }
+        if not base_skill.complete:
+            safety_results["base_skill_package"] = "incomplete"
+        if not regression_tasks:
+            safety_results["regression"] = "missing"
+        if any(task.replayability is Replayability.manual_review for task in all_tasks):
+            safety_results["replayability"] = "manual_review_required"
+        if not base_skill.complete or not regression_tasks or "replayability" in safety_results:
+            return apply_skill_quality(
+                SkillEvaluation(
+                    evaluation_id=evaluation_id,
+                    proposal_id=proposal.proposal_id,
+                    user_id=proposal.user_id,
+                    source_replay_results=[],
+                    held_out_results=[],
+                    baseline_results=[],
+                    candidate_results=[],
+                    regression_results=[],
+                    safety_results=safety_results,
+                    quality_score=0.0,
+                    decision=EvaluationDecision.manual_review,
+                    created_at=datetime.now(UTC),
+                ),
+                config=self.quality_config,
+            )
+
+        resolved_parent = Path(parent_dir) if parent_dir is not None else None
+        source_results: list[TaskEvaluationResult] = []
+        regression_results: list[TaskEvaluationResult] = []
+        baseline_results: list[TaskEvaluationResult] = []
+        candidate_results: list[TaskEvaluationResult] = []
+        regression_pairs: list[
+            tuple[
+                TaskEvaluationResult,
+                TaskEvaluationResult,
+            ]
+        ] = []
+        for split, tasks in (
+            ("source", source_tasks),
+            ("regression", regression_tasks),
+        ):
+            for task in tasks:
+                base_result = await _run_replay_task(
+                    self.runtime,
+                    task,
+                    split=split,
+                    condition="base_skill",
+                    skill_package=base_skill,
+                    parent_dir=resolved_parent,
+                )
+                candidate_result = await _run_replay_task(
+                    self.runtime,
+                    task,
+                    split=split,
+                    condition="candidate_skill",
+                    skill_package=candidate_skill,
+                    parent_dir=resolved_parent,
+                )
+                baseline_results.append(base_result)
+                candidate_results.append(candidate_result)
+                if split == "source":
+                    source_results.append(candidate_result)
+                else:
+                    regression_results.append(candidate_result)
+                    regression_pairs.append(
+                        (
+                            base_result,
+                            candidate_result,
+                        )
+                    )
+
+        source_rate = _success_rate(source_results)
+        base_success_pairs = [pair for pair in regression_pairs if pair[0].success]
+        regression_count = sum(not candidate.success for _, candidate in base_success_pairs)
+        regression_rate = regression_count / len(base_success_pairs) if base_success_pairs else 0.0
+        side_effect_violation = any(
+            "side_effect_policy_violation" in result.errors
+            for result in [
+                *baseline_results,
+                *candidate_results,
+            ]
+        )
+        executable_support = any(item.executable and item.path != "SKILL.md" for item in proposal.proposed_files)
+        safety_results.update(
+            {
+                "source_replay": (f"{sum(result.success for result in source_results)}/{len(source_results)}"),
+                "regression_rate": (f"{regression_rate:.6f}"),
+                "regression_sample": str(len(base_success_pairs)),
+                "side_effects": ("violation" if side_effect_violation else "allow"),
+            }
+        )
+        if executable_support:
+            safety_results["executable_support"] = "manual_review_required"
+        if proposal.requires_manual_review:
+            safety_results["proposal_review"] = "manual_review_required"
+
+        if side_effect_violation:
+            decision = EvaluationDecision.reject
+        elif source_rate < self.quality_config.min_source_replay_success_rate or regression_rate > self.quality_config.max_regression_rate:
+            decision = EvaluationDecision.reject
+        elif not base_success_pairs:
+            decision = EvaluationDecision.manual_review
+        elif executable_support or proposal.requires_manual_review:
+            decision = EvaluationDecision.manual_review
+        else:
+            decision = EvaluationDecision.approve
+        return apply_skill_quality(
+            SkillEvaluation(
+                evaluation_id=evaluation_id,
+                proposal_id=proposal.proposal_id,
+                user_id=proposal.user_id,
+                source_replay_results=source_results,
+                held_out_results=[],
+                baseline_results=baseline_results,
+                candidate_results=candidate_results,
+                regression_results=regression_results,
+                safety_results=safety_results,
+                quality_score=0.0,
+                decision=decision,
+                created_at=datetime.now(UTC),
+            ),
+            config=self.quality_config,
+        )
+
+    async def evaluate_and_persist(
+        self,
+        proposal: SkillProposal,
+        *,
+        base_skill: ReplaySkillPackage,
+        source_tasks: list[ReplayTaskSpec],
+        regression_tasks: list[ReplayTaskSpec],
+        store: SkillEvolutionStore,
+        parent_dir: str | Path | None = None,
+    ) -> PutResult[SkillEvaluation]:
+        """Evaluate once, persist raw results, and reject regressive patches."""
+        _validate_patch_skill_suite(
+            proposal,
+            base_skill,
+            source_tasks,
+            regression_tasks,
+        )
+        evaluation_id = _patch_evaluation_id(
+            proposal,
+            base_skill,
+            source_tasks,
+            regression_tasks,
+            self.quality_config,
+        )
+        stored = await store.get_proposal(
+            proposal.user_id,
+            proposal.proposal_id,
+        )
+        if stored is None:
+            raise ValueError("proposal must be persisted before evaluation")
+        if proposal.model_dump(
+            mode="json",
+            exclude=_PROPOSAL_COMPARISON_EXCLUDE,
+        ) != stored.model_dump(
+            mode="json",
+            exclude=_PROPOSAL_COMPARISON_EXCLUDE,
+        ):
+            raise ValueError("persisted proposal does not match evaluation input")
+        existing = await store.get_evaluation(
+            proposal.user_id,
+            evaluation_id,
+        )
+        if stored.status is ProposalStatus.staged:
+            try:
+                stored = await store.transition_proposal(
+                    user_id=stored.user_id,
+                    proposal_id=stored.proposal_id,
+                    expected_status=ProposalStatus.staged,
+                    new_status=ProposalStatus.validating,
+                    transition=_evaluation_started_transition(
+                        evaluation_id,
+                    ),
+                )
+            except EvolutionStoreConflict:
+                refreshed = await store.get_proposal(
+                    stored.user_id,
+                    stored.proposal_id,
+                )
+                if refreshed is None or refreshed.status is not ProposalStatus.validating:
+                    raise
+                stored = refreshed
+        elif stored.status is ProposalStatus.rejected and existing is not None and existing.decision is EvaluationDecision.reject:
+            return PutResult(existing, created=False)
+        elif stored.status is not ProposalStatus.validating:
+            raise ValueError("proposal is not eligible for evaluation")
+        if existing is not None:
+            if existing.decision is EvaluationDecision.reject:
+                await self._reject_validating_proposal(
+                    store,
+                    stored,
+                    existing,
+                )
+            return PutResult(existing, created=False)
+
+        evaluation = await self.evaluate(
+            stored,
+            base_skill=base_skill,
+            source_tasks=source_tasks,
+            regression_tasks=regression_tasks,
+            parent_dir=parent_dir,
+        )
+        try:
+            put_result = await store.put_evaluation(
+                evaluation,
+            )
+        except EvolutionStoreConflict:
+            winner = await store.get_evaluation(
+                proposal.user_id,
+                evaluation_id,
+            )
+            if winner is None:
+                raise
+            put_result = PutResult(
+                winner,
+                created=False,
+            )
+        if put_result.value.decision is EvaluationDecision.reject:
+            await self._reject_validating_proposal(
+                store,
+                stored,
+                put_result.value,
+            )
+        if put_result.created:
+            observe_evaluation(
+                self.observability,
+                put_result.value,
+                skill_name=stored.skill_name,
+            )
+        return put_result
+
+    async def _reject_validating_proposal(
+        self,
+        store: SkillEvolutionStore,
+        proposal: SkillProposal,
+        evaluation: SkillEvaluation,
+    ) -> None:
+        current = await store.get_proposal(
+            proposal.user_id,
+            proposal.proposal_id,
+        )
+        if current is None or current.status is ProposalStatus.rejected:
+            return
+        if current.status is not ProposalStatus.validating:
+            raise EvolutionStoreConflict("failed evaluation requires a validating proposal")
+        try:
+            await store.transition_proposal(
+                user_id=current.user_id,
+                proposal_id=current.proposal_id,
+                expected_status=ProposalStatus.validating,
+                new_status=ProposalStatus.rejected,
+                transition=_evaluation_rejected_transition(
+                    evaluation,
+                ),
             )
         except EvolutionStoreConflict:
             refreshed = await store.get_proposal(

@@ -277,3 +277,88 @@ async def test_evolution_trace_failure_does_not_change_run_outcome() -> None:
         thread_id="thread-1",
         run_id=record.run_id,
     )
+
+
+@pytest.mark.anyio
+async def test_persisted_trace_is_enqueued_after_terminal_status() -> None:
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1", user_id="user-1")
+    store = MemoryRunEventStore()
+    enqueue = AsyncMock()
+
+    class DummyAgent:
+        async def astream(
+            self,
+            graph_input,
+            config=None,
+            stream_mode=None,
+            subgraphs=False,
+        ):
+            yield {"messages": [AIMessage(content="Completed.")]}
+
+    await run_agent(
+        _bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(
+            checkpointer=None,
+            event_store=store,
+            app_config=_app_config(enabled=True),
+            enqueue_evolution_job=enqueue,
+        ),
+        agent_factory=lambda *, config: DummyAgent(),
+        graph_input={},
+        config={},
+    )
+
+    enqueue.assert_awaited_once()
+    snapshot = enqueue.await_args.args[0]
+    assert isinstance(snapshot, EvolutionTraceSnapshot)
+    assert snapshot.run_id == record.run_id
+    assert snapshot.user_id == "user-1"
+    assert record.status is RunStatus.success
+
+
+@pytest.mark.anyio
+async def test_evolution_enqueue_failure_does_not_change_run_outcome() -> None:
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1", user_id="user-1")
+    store = MemoryRunEventStore()
+    enqueue = AsyncMock(side_effect=RuntimeError("coordinator unavailable"))
+
+    class DummyAgent:
+        async def astream(
+            self,
+            graph_input,
+            config=None,
+            stream_mode=None,
+            subgraphs=False,
+        ):
+            yield {"messages": [AIMessage(content="Completed.")]}
+
+    await run_agent(
+        _bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(
+            checkpointer=None,
+            event_store=store,
+            app_config=_app_config(enabled=True),
+            enqueue_evolution_job=enqueue,
+        ),
+        agent_factory=lambda *, config: DummyAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert record.status is RunStatus.success
+    assert (
+        len(
+            await _trace_events(
+                store,
+                thread_id="thread-1",
+                run_id=record.run_id,
+            )
+        )
+        == 1
+    )

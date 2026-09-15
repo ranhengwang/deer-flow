@@ -21,6 +21,7 @@ from deerflow.skill_evolution.evaluator import (
     ReplayTaskSpec,
     build_replay_fixture_snapshot,
     build_replay_task_spec,
+    run_replay_task,
 )
 from deerflow.skill_evolution.models import (
     ComplexitySignals,
@@ -34,11 +35,16 @@ from deerflow.skill_evolution.models import (
     ProposalOperation,
     ProposalStatus,
     ProposedSkillFile,
+    QualityDesignation,
     SkillPatchOperation,
     SkillProposal,
     SkillUsage,
     ToolSignature,
     TraceRunStatus,
+)
+from deerflow.skill_evolution.observability import (
+    EvolutionLifecycleKind,
+    EvolutionObservability,
 )
 from deerflow.skill_evolution.store.memory import InMemorySkillEvolutionStore
 
@@ -201,12 +207,14 @@ class FakeReplayRuntime:
         timeout_events: set[str] | None = None,
         mutate_candidate: bool = False,
         output_symlink_target: Path | None = None,
+        extra_artifact_count: int = 0,
     ) -> None:
         self.fail_candidate_events = fail_candidate_events or set()
         self.error_events = error_events or set()
         self.timeout_events = timeout_events or set()
         self.mutate_candidate = mutate_candidate
         self.output_symlink_target = output_symlink_target
+        self.extra_artifact_count = extra_artifact_count
         self.agent_calls: list[tuple[str, str, bool, str | None]] = []
         self.command_calls: list[tuple[str, str]] = []
 
@@ -229,6 +237,13 @@ class FakeReplayRuntime:
         fixture = (request.paths.workspace / "project" / "input.txt").read_text(encoding="utf-8")
         assert fixture == request.spec.source_event_id
         if request.spec.source_event_id in self.timeout_events:
+            request.progress.update(
+                ReplayAgentExecution(
+                    tool_calls=1,
+                    input_tokens=40,
+                    output_tokens=10,
+                )
+            )
             await asyncio.sleep(2)
         if request.spec.source_event_id in self.error_events:
             raise RuntimeError("sensitive runtime detail")
@@ -241,6 +256,11 @@ class FakeReplayRuntime:
             output.symlink_to(self.output_symlink_target)
         else:
             output.write_text(content, encoding="utf-8")
+        for index in range(self.extra_artifact_count):
+            (request.paths.workspace / f"generated-{index}.txt").write_text(
+                str(index),
+                encoding="utf-8",
+            )
         if self.mutate_candidate and candidate_path is not None:
             skill_file = candidate_path / "SKILL.md"
             skill_file.chmod(0o644)
@@ -318,13 +338,16 @@ async def test_new_skill_evaluation_runs_paired_source_and_held_out_tasks(
     )
 
     assert evaluation.decision is EvaluationDecision.approve
-    assert evaluation.quality_score == 0.0
+    assert evaluation.quality_score > 0.0
+    assert evaluation.quality is not None
+    assert evaluation.quality.designation is QualityDesignation.insufficient_evidence
+    assert "insufficient_held_out_tasks" in evaluation.quality.blockers
+    assert "insufficient_environment_diversity" in evaluation.quality.blockers
     assert len(evaluation.source_replay_results) == 3
     assert len(evaluation.held_out_results) == 1
     assert len(evaluation.baseline_results) == 4
     assert len(evaluation.candidate_results) == 4
     assert evaluation.regression_results == []
-    assert evaluation.safety_results["quality_score"] == "deferred_phase_6_4"
     assert evaluation.safety_results["source_replay"] == "3/3"
     assert evaluation.safety_results["held_out"] == "1/1"
 
@@ -478,6 +501,27 @@ async def test_risky_proposal_runs_evaluation_but_remains_manual_review(
 
 
 @pytest.mark.asyncio
+async def test_risky_proposal_that_fails_held_out_is_rejected(
+    tmp_path: Path,
+) -> None:
+    evaluator = NewSkillProposalEvaluator(
+        runtime=FakeReplayRuntime(
+            fail_candidate_events={"held-out-1"},
+        )
+    )
+
+    evaluation = await evaluator.evaluate(
+        _proposal(requires_manual_review=True),
+        source_tasks=_source_tasks(),
+        held_out_tasks=[_task("held-out-1")],
+        parent_dir=tmp_path,
+    )
+
+    assert evaluation.held_out_results[0].success is False
+    assert evaluation.decision is EvaluationDecision.reject
+
+
+@pytest.mark.asyncio
 async def test_runtime_error_is_bounded_and_does_not_leak_message(
     tmp_path: Path,
 ) -> None:
@@ -525,6 +569,28 @@ async def test_agent_timeout_is_recorded_and_workspace_is_cleaned(
 
     assert evaluation.source_replay_results[0].success is False
     assert "agent_timeout" in evaluation.source_replay_results[0].errors
+    assert evaluation.source_replay_results[0].metrics.tool_calls == 1
+    assert evaluation.source_replay_results[0].metrics.input_tokens == 40
+    assert evaluation.source_replay_results[0].metrics.output_tokens == 10
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_side_effect_artifacts_are_bounded_without_aborting_replay(
+    tmp_path: Path,
+) -> None:
+    result = await run_replay_task(
+        FakeReplayRuntime(extra_artifact_count=200),
+        _task("source-1"),
+        split="source",
+        condition="no_skill",
+        skill_package=None,
+        parent_dir=tmp_path,
+    )
+
+    assert result.success is False
+    assert "side_effect_policy_violation" in result.errors
+    assert len(result.artifacts) == 128
     assert list(tmp_path.iterdir()) == []
 
 
@@ -638,7 +704,11 @@ async def test_evaluate_and_persist_is_idempotent_and_leaves_passed_proposal_val
     tmp_path: Path,
 ) -> None:
     runtime = FakeReplayRuntime()
-    evaluator = NewSkillProposalEvaluator(runtime=runtime)
+    observer = EvolutionObservability()
+    evaluator = NewSkillProposalEvaluator(
+        runtime=runtime,
+        observability=observer,
+    )
     store = InMemorySkillEvolutionStore()
     proposal = _proposal()
     await store.put_proposal(proposal)
@@ -669,6 +739,8 @@ async def test_evaluate_and_persist_is_idempotent_and_leaves_passed_proposal_val
     )
     assert stored_proposal is not None
     assert stored_proposal.status is ProposalStatus.validating
+    assert [event.kind for event in observer.recent_events()] == [EvolutionLifecycleKind.evaluated]
+    assert observer.snapshot().proposal_pass_rate == 1.0
 
 
 @pytest.mark.asyncio
@@ -699,3 +771,8 @@ async def test_persisted_failed_evaluation_rejects_proposal(
     )
     assert stored_proposal is not None
     assert stored_proposal.status is ProposalStatus.rejected
+    assert [item.reason_code for item in stored_proposal.status_history] == [
+        "evaluation_started",
+        "evaluation_rejected",
+    ]
+    assert stored_proposal.status_history[-1].evaluation_id == result.value.evaluation_id

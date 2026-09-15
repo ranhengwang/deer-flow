@@ -202,3 +202,187 @@ class SkillEvolutionEvaluationRow(Base):
             "created_at",
         ),
     )
+
+
+class SkillEvolutionPublicationRow(Base):
+    __tablename__ = "skill_evolution_publications"
+
+    user_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    proposal_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    evaluation_id: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+    )
+    skill_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    base_package_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    published_package_hash: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "proposal_id",
+            name="uq_skill_evolution_publication_user_proposal",
+        ),
+        Index(
+            "ix_skill_evolution_publications_user_status",
+            "user_id",
+            "status",
+        ),
+        Index(
+            "ix_skill_evolution_publications_user_skill",
+            "user_id",
+            "skill_name",
+        ),
+        Index(
+            "ix_skill_evolution_publications_user_updated",
+            "user_id",
+            "updated_at",
+        ),
+    )
+
+
+class SkillEvolutionCreditRow(Base):
+    __tablename__ = "skill_evolution_credits"
+
+    user_id: Mapped[str] = mapped_column(
+        String(128),
+        primary_key=True,
+    )
+    id: Mapped[str] = mapped_column(
+        String(128),
+        primary_key=True,
+    )
+    kind: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+    )
+    run_id: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+    )
+    skill_name: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+    )
+    publication_id: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+    )
+    revision: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+    )
+    payload: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_skill_evolution_credits_user_kind_created",
+            "user_id",
+            "kind",
+            "created_at",
+        ),
+        Index(
+            "ix_skill_evolution_credits_user_skill_created",
+            "user_id",
+            "skill_name",
+            "created_at",
+        ),
+        Index(
+            "ix_skill_evolution_credits_user_publication",
+            "user_id",
+            "publication_id",
+        ),
+    )
+
+
+class SkillEvolutionJobRow(Base):
+    __tablename__ = "skill_evolution_jobs"
+
+    user_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    run_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    thread_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    pipeline_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_token: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    last_error_code: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+    )
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "idempotency_key",
+            name="uq_skill_evolution_job_user_idempotency",
+        ),
+        Index(
+            "ix_skill_evolution_jobs_status_due",
+            "status",
+            "next_attempt_at",
+        ),
+        Index(
+            "ix_skill_evolution_jobs_status_lease",
+            "status",
+            "lease_expires_at",
+        ),
+        Index(
+            "ix_skill_evolution_jobs_user_run",
+            "user_id",
+            "run_id",
+        ),
+    )

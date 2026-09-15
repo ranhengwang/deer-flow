@@ -10,6 +10,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from deerflow.config.agents_config import load_agent_soul
+from deerflow.config.skill_evolution_config import is_skill_manage_enabled
 from deerflow.config.subagents_config import (
     DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN,
     clamp_subagent_concurrency,
@@ -271,8 +272,8 @@ async def refresh_user_skills_system_prompt_cache_async(user_id: str) -> None:
     invalidate_user_skill_cache(user_id)
 
 
-def _build_skill_evolution_section(skill_evolution_enabled: bool) -> str:
-    if not skill_evolution_enabled:
+def _build_skill_evolution_section(skill_manage_enabled: bool) -> str:
+    if not skill_manage_enabled:
         return ""
     return """
 ## Skill Self-Evolution
@@ -832,16 +833,16 @@ def get_skills_prompt_section(
             # synchronously-loaded disabled section was populated (#4144).
             app_config = get_app_config()
             container_base_path = app_config.skills.container_path
-            skill_evolution_enabled = app_config.skill_evolution.enabled
+            skill_manage_enabled = is_skill_manage_enabled(app_config.skill_evolution)
         except Exception:
             app_config = None
             container_base_path = DEFAULT_SKILLS_CONTAINER_PATH
-            skill_evolution_enabled = False
+            skill_manage_enabled = False
     else:
         container_base_path = app_config.skills.container_path
-        skill_evolution_enabled = app_config.skill_evolution.enabled
+        skill_manage_enabled = is_skill_manage_enabled(app_config.skill_evolution)
 
-    skill_evolution_section = _build_skill_evolution_section(skill_evolution_enabled)
+    skill_evolution_section = _build_skill_evolution_section(skill_manage_enabled)
 
     # ── Deferred discovery path — storage not needed (caller supplies names) ─
     if skill_names is not None:
@@ -863,7 +864,7 @@ def get_skills_prompt_section(
 
     skills = get_enabled_skills_for_config(app_config, user_id=user_id)
 
-    if not skills and not disabled_skills and not skill_evolution_enabled:
+    if not skills and not disabled_skills and not skill_manage_enabled:
         return ""
 
     if available_skills is not None and not any(skill.name in available_skills for skill in skills):

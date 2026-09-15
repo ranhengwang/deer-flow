@@ -574,6 +574,7 @@ class RunContext:
     # this process" (embedded/tests) and resolves to the config default.
     checkpoint_snapshot_frequency: int | None = None
     on_run_completed: Any | None = field(default=None)
+    enqueue_evolution_job: Any | None = field(default=None)
 
 
 def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
@@ -1351,8 +1352,9 @@ async def run_agent(
                 logger.warning("Failed to persist terminal status for run %s after delivery receipt attempts", run_id, exc_info=True)
 
         if not record.ownership_lost and event_store is not None and _skill_evolution_enabled(ctx.app_config):
+            persisted_evolution_trace: tuple[EvolutionTraceSnapshot, bool] | None = None
             try:
-                await _persist_evolution_trace_snapshot(
+                persisted_evolution_trace = await _persist_evolution_trace_snapshot(
                     event_store=event_store,
                     record=record,
                     runtime_context=(runtime_ctx if runtime_ctx is not None else config.get("context")),
@@ -1363,6 +1365,16 @@ async def run_agent(
                     run_id,
                     exc_info=True,
                 )
+            if persisted_evolution_trace is not None and ctx.enqueue_evolution_job is not None:
+                try:
+                    snapshot, _ = persisted_evolution_trace
+                    await ctx.enqueue_evolution_job(snapshot)
+                except Exception:
+                    logger.warning(
+                        "Failed to enqueue evolution job for run %s (non-fatal)",
+                        run_id,
+                        exc_info=True,
+                    )
 
         if not record.ownership_lost and journal is not None and persist_completion:
             try:

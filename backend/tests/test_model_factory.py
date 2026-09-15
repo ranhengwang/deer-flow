@@ -733,6 +733,35 @@ def test_non_openai_provider_does_not_receive_stream_usage_default(monkeypatch):
     assert "stream_usage" not in captured
 
 
+def test_ollama_reasoning_is_disabled_when_thinking_is_disabled(monkeypatch):
+    from langchain_ollama import ChatOllama
+
+    model = ModelConfig(
+        name="ollama-reasoning",
+        display_name="Ollama Reasoning",
+        description=None,
+        use="langchain_ollama:ChatOllama",
+        model="qwen3:8b",
+        reasoning=True,
+        supports_vision=False,
+        supports_thinking=True,
+    )
+    cfg = _make_app_config([model])
+    captured: dict = {}
+    _patch_factory(
+        monkeypatch,
+        cfg,
+        model_class=_capturing_class(ChatOllama, captured),
+    )
+
+    factory_module.create_chat_model(
+        name="ollama-reasoning",
+        thinking_enabled=False,
+    )
+
+    assert captured["reasoning"] is False
+
+
 def test_openai_compatible_provider_multiple_models(monkeypatch):
     """Multiple models from the same OpenAI-compatible provider should coexist."""
     m1 = ModelConfig(

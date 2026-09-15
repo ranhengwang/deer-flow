@@ -430,14 +430,22 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         if sf is not None:
             from deerflow.persistence.feedback import FeedbackRepository
             from deerflow.persistence.run import RunRepository
+            from deerflow.skill_evolution.store.sql import (
+                SqlSkillEvolutionStore,
+            )
 
             app.state.run_store = RunRepository(sf)
             app.state.feedback_repo = FeedbackRepository(sf)
+            app.state.skill_evolution_store = SqlSkillEvolutionStore(sf)
         else:
             from deerflow.runtime.runs.store.memory import MemoryRunStore
+            from deerflow.skill_evolution.store.memory import (
+                InMemorySkillEvolutionStore,
+            )
 
             app.state.run_store = MemoryRunStore()
             app.state.feedback_repo = None
+            app.state.skill_evolution_store = InMemorySkillEvolutionStore()
 
         from deerflow.persistence.thread_meta import make_thread_store
 
@@ -571,6 +579,14 @@ get_checkpointer: Callable[[Request], Checkpointer] = _require("checkpointer", "
 get_run_event_store: Callable[[Request], RunEventStore] = _require("run_event_store", "Run event store")
 get_feedback_repo: Callable[[Request], FeedbackRepository] = _require("feedback_repo", "Feedback")
 get_run_store: Callable[[Request], RunStore] = _require("run_store", "Run store")
+get_skill_evolution_store = _require(
+    "skill_evolution_store",
+    "Skill evolution store",
+)
+get_skill_publication_service = _require(
+    "skill_publication_service",
+    "Skill publication service",
+)
 
 
 def get_store(request: Request):
@@ -642,6 +658,15 @@ def get_run_context(request: Request) -> RunContext:
         app_config=get_config(),
         extensions=getattr(request.app.state, "extensions", None),
         on_run_completed=getattr(request.app.state, "scheduled_task_service", None).handle_run_completion if getattr(request.app.state, "scheduled_task_service", None) is not None else None,
+        enqueue_evolution_job=getattr(
+            getattr(
+                request.app.state,
+                "evolution_coordinator",
+                None,
+            ),
+            "enqueue_snapshot",
+            None,
+        ),
     )
 
 

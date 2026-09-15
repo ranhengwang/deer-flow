@@ -10,6 +10,9 @@ from pathlib import Path
 import yaml
 
 from deerflow.config.app_config import AppConfig
+from deerflow.config.skill_evolution_config import (
+    SkillEvolutionPublicationConfig,
+)
 
 
 def _make_config_files(tmpdir: Path, user_config: dict, example_config: dict) -> Path:
@@ -178,6 +181,11 @@ def test_version_26_config_upgrades_to_checkpoint_channel_mode(tmp_path, caplog)
     assert upgraded["skill_evolution"]["evidence"]["min_distinct_runs"] == 3
     assert upgraded["skill_evolution"]["evidence"]["tool_call_complexity_threshold"] == 5
     assert upgraded["skill_evolution"]["grouping"]["deterministic_threshold"] == 0.65
+    assert upgraded["skill_evolution"]["publication"]["mode"] == "manual"
+    assert upgraded["skill_evolution"]["publication"]["allow_non_executable_auto_publish"] is False
+    assert upgraded["skill_evolution"]["publication"]["allow_executable_auto_publish"] is False
+    assert upgraded["skill_evolution"]["publication"]["require_held_out_evaluation"] is True
+    assert upgraded["skill_evolution"]["publication"]["proposal_ttl_days"] == 180
     assert upgraded["skill_evolution"]["grouping"]["semantic_threshold"] == 0.82
     assert upgraded["skill_evolution"]["grouping"]["llm_confirmation"] is True
     assert upgraded["skill_evolution"]["grouping"]["embedding"]["enabled"] is False
@@ -285,6 +293,66 @@ def test_new_skill_evaluation_bumped_config_version():
     assert example.get("config_version", 0) >= 40
     assert quality["min_source_replay_success_rate"] == 1.0
     assert quality["min_held_out_success_rate"] == 0.8
+
+
+def test_patch_skill_evaluation_bumped_config_version():
+    """Regression-rate threshold must ship in config version 41+."""
+    example = _load_repo_example()
+    quality = example["skill_evolution"]["quality"]
+
+    assert example.get("config_version", 0) >= 41
+    assert quality["max_regression_rate"] == 0.0
+
+
+def test_skill_quality_scoring_bumped_config_version():
+    """Quality formula sample gates must ship in config version 42+."""
+    example = _load_repo_example()
+    quality = example["skill_evolution"]["quality"]
+
+    assert example.get("config_version", 0) >= 42
+    assert quality["high_quality_threshold"] == 0.75
+    assert quality["min_total_candidate_tasks"] == 5
+    assert quality["min_held_out_tasks"] == 2
+    assert quality["min_regression_tasks"] == 2
+    assert quality["min_distinct_environments"] == 2
+
+
+def test_skill_approval_policy_bumped_config_version():
+    """Approval and expiration gates must ship in config version 43+."""
+    example = _load_repo_example()
+    publication = example["skill_evolution"]["publication"]
+
+    assert example.get("config_version", 0) >= 43
+    assert publication["mode"] == "manual"
+    assert publication["allow_non_executable_auto_publish"] is False
+    assert publication["allow_executable_auto_publish"] is False
+    assert publication["require_held_out_evaluation"] is True
+    assert publication["proposal_ttl_days"] == 180
+
+
+def test_skill_evolution_coordinator_bumped_config_version():
+    """Durable worker lifecycle settings must ship in config version 44+."""
+    example = _load_repo_example()
+    coordinator = example["skill_evolution"]["coordinator"]
+
+    assert example.get("config_version", 0) >= 44
+    assert coordinator["queue_capacity"] == 64
+    assert coordinator["max_concurrent_jobs"] == 2
+    assert coordinator["poll_interval_seconds"] == 1.0
+    assert coordinator["lease_seconds"] == 120.0
+    assert coordinator["max_attempts"] == 5
+    assert coordinator["retry_base_delay_seconds"] == 5.0
+    assert coordinator["retry_max_delay_seconds"] == 300.0
+    assert coordinator["shutdown_timeout_seconds"] == 10.0
+
+
+def test_direct_skill_publication_mode_bumped_config_version():
+    """Direct publication is explicit and the distributed default stays manual."""
+    example = _load_repo_example()
+
+    assert example.get("config_version", 0) >= 45
+    assert example["skill_evolution"]["publication"]["mode"] == "manual"
+    assert SkillEvolutionPublicationConfig(mode="direct").mode == "direct"
 
 
 def test_version_26_config_reported_outdated_against_example(caplog):

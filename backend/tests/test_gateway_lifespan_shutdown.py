@@ -119,6 +119,99 @@ def test_lifespan_sweeps_upload_staging_files_on_startup():
     stop_channel_service.assert_awaited_once()
 
 
+def test_lifespan_starts_and_stops_skill_evolution_coordinator():
+    from app.gateway.app import lifespan
+
+    app = FastAPI()
+    startup_config = MagicMock()
+    startup_config.log_level = "INFO"
+    startup_config.memory.enabled = False
+    startup_config.memory.shutdown_flush_timeout_seconds = 5.0
+    startup_config.skill_evolution.enabled = True
+    coordinator_config = object()
+    startup_config.skill_evolution.coordinator = coordinator_config
+    fake_channel_service = MagicMock()
+    fake_channel_service.get_status.return_value = {}
+    coordinator = MagicMock()
+    coordinator.start = AsyncMock()
+    coordinator.stop = AsyncMock(return_value=True)
+    coordinator_factory = MagicMock(return_value=coordinator)
+    processor_factory = MagicMock(return_value=object())
+    publication_service = MagicMock()
+    publication_service_factory = MagicMock(return_value=publication_service)
+
+    @asynccontextmanager
+    async def runtime(runtime_app, _startup_config):
+        runtime_app.state.run_event_store = object()
+        runtime_app.state.skill_evolution_store = object()
+        yield
+
+    async def fake_start(_startup_config, **_kwargs):
+        return fake_channel_service
+
+    async def drive() -> None:
+        with (
+            patch(
+                "app.gateway.app.get_app_config",
+                return_value=startup_config,
+            ),
+            patch(
+                "app.gateway.app.get_gateway_config",
+                return_value=MagicMock(host="x", port=0),
+            ),
+            patch("app.gateway.app.langgraph_runtime", runtime),
+            patch("deerflow.skills.projection.ensure_public_skill_projection"),
+            patch(
+                "deerflow.skill_evolution.coordinator.EvolutionCoordinator",
+                coordinator_factory,
+            ),
+            patch(
+                "deerflow.skill_evolution.worker.EvolutionPipelineProcessor",
+                processor_factory,
+            ),
+            patch(
+                ("deerflow.skill_evolution.publication.SkillPublicationService"),
+                publication_service_factory,
+            ),
+            patch(
+                "app.channels.service.start_channel_service",
+                side_effect=fake_start,
+            ),
+            patch(
+                "app.channels.service.stop_channel_service",
+                new=AsyncMock(),
+            ),
+            patch(
+                "app.gateway.app.auth.close_oidc_service",
+                new=AsyncMock(),
+            ),
+            patch(
+                "deerflow.agents.memory.get_memory_manager",
+                return_value=MagicMock(),
+            ),
+        ):
+            async with lifespan(app):
+                assert app.state.evolution_coordinator is coordinator
+                assert app.state.skill_publication_service is publication_service
+
+    asyncio.run(drive())
+
+    processor_factory.assert_called_once()
+    assert processor_factory.call_args.kwargs["direct_publisher"] is publication_service.publish_direct
+    coordinator_factory.assert_called_once_with(
+        store=app.state.skill_evolution_store,
+        processor=processor_factory.return_value,
+        config=coordinator_config,
+        observability=(app.state.skill_evolution_observability),
+    )
+    coordinator.start.assert_awaited_once()
+    coordinator.stop.assert_awaited_once()
+    publication_service_factory.assert_called_once_with(
+        store=app.state.skill_evolution_store,
+        observability=(app.state.skill_evolution_observability),
+    )
+
+
 async def _run_lifespan_with_memory_flush(
     *,
     enabled: bool,

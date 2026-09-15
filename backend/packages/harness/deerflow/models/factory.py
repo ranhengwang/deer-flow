@@ -268,6 +268,10 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         elif has_thinking_settings and effective_wte.get("thinking", {}).get("type"):
             # Native langchain_anthropic: thinking is a direct constructor parameter
             model_settings_from_config["thinking"] = {"type": "disabled"}
+        elif model_config.when_thinking_disabled is None and "reasoning" in model_settings_from_config and "reasoning" in getattr(model_class, "model_fields", {}):
+            # Native providers such as ChatOllama use a top-level boolean
+            # `reasoning` switch instead of DeerFlow's `thinking` shortcut.
+            model_settings_from_config["reasoning"] = False
     if not model_config.supports_reasoning_effort:
         kwargs.pop("reasoning_effort", None)
         model_settings_from_config.pop("reasoning_effort", None)

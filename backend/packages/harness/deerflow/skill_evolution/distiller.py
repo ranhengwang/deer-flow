@@ -8,6 +8,7 @@ import json
 import logging
 import posixpath
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Annotated, Any, Protocol, Self
 
@@ -16,6 +17,9 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import Field, StringConstraints, ValidationError, model_validator
 
 from deerflow.config.app_config import AppConfig
+from deerflow.skill_evolution.approval import (
+    DEFAULT_PROPOSAL_TTL_DAYS,
+)
 from deerflow.skill_evolution.models import (
     ClusterStatus,
     DetailText,
@@ -124,6 +128,14 @@ class DistilledConflict(_EvidenceLinked):
     description: DetailText
 
 
+def _is_valid_supporting_file_path(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    raw = value.strip().replace("\\", "/")
+    normalized = posixpath.normpath(raw)
+    return not (PurePosixPath(raw).is_absolute() or normalized != raw or normalized in {"", ".", "SKILL.md"} or any(part in {"", ".."} for part in PurePosixPath(normalized).parts))
+
+
 class DistilledSupportingFile(_EvidenceLinked):
     path: Annotated[
         str,
@@ -139,9 +151,7 @@ class DistilledSupportingFile(_EvidenceLinked):
 
     @model_validator(mode="after")
     def _validate_path(self) -> Self:
-        raw = self.path.replace("\\", "/")
-        normalized = posixpath.normpath(raw)
-        if PurePosixPath(raw).is_absolute() or normalized != raw or normalized in {"", ".", "SKILL.md"} or any(part in {"", ".."} for part in PurePosixPath(normalized).parts):
+        if not _is_valid_supporting_file_path(self.path):
             raise ValueError("supporting file path must be normalized and relative")
         return self
 
@@ -420,6 +430,12 @@ def _parse_output(response: Any) -> NewSkillDistillationOutput:
             raise DistillationError("model response is not strict JSON") from exc
     if not isinstance(payload, dict):
         raise DistillationError("model response must be a JSON object")
+    supporting_files = payload.get("supporting_files")
+    if isinstance(supporting_files, list):
+        payload = {
+            **payload,
+            "supporting_files": [item for item in supporting_files if not isinstance(item, dict) or _is_valid_supporting_file_path(item.get("path"))],
+        }
     try:
         return NewSkillDistillationOutput.model_validate(payload)
     except ValidationError as exc:
@@ -718,6 +734,10 @@ def _build_proposal(
         review_reasons=review_reasons,
         status=ProposalStatus.staged,
         created_at=cluster.updated_at,
+        expires_at=cluster.updated_at
+        + timedelta(
+            days=DEFAULT_PROPOSAL_TTL_DAYS,
+        ),
     )
 
 

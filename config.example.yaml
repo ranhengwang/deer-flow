@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 40
+config_version: 45
 
 # ============================================================================
 # Logging
@@ -1864,6 +1864,27 @@ skill_evolution:
   quality:
     min_source_replay_success_rate: 1.0 # Every source task must pass with the candidate
     min_held_out_success_rate: 0.8 # Reject source-only overfitting below this held-out rate
+    max_regression_rate: 0.0 # Existing-Skill updates cannot break a previously passing regression task
+    high_quality_threshold: 0.75 # Minimum aggregate skill-quality-v1 score
+    min_total_candidate_tasks: 5 # Three source runs alone cannot establish high quality
+    min_held_out_tasks: 2 # Required same-family held-out tasks for a new Skill
+    min_regression_tasks: 2 # Required old-Skill-success regression pairs for a patch
+    min_distinct_environments: 2 # Require evidence across more than one environment
+  publication:
+    mode: manual # manual | eligible_auto | direct; direct skips quality evaluation and approval but retains mutation security checks
+    allow_non_executable_auto_publish: false # Future opt-in; only low-risk held-out-passing updates are eligible
+    allow_executable_auto_publish: false # Fixed false in v1; executable content is always manual
+    require_held_out_evaluation: true # Fixed true in v1 for any automatic approval
+    proposal_ttl_days: 180 # Fallback for legacy Proposals without an explicit expires_at
+  coordinator:
+    queue_capacity: 64 # Bounded local wake-up hints; durable SQL jobs remain authoritative
+    max_concurrent_jobs: 2 # Per-Gateway background processing limit
+    poll_interval_seconds: 1.0 # Also recovers pending/retry/expired-lease jobs after restart
+    lease_seconds: 120.0 # Renewed while a worker owns a job
+    max_attempts: 5 # Exhausted jobs enter dead state for operator inspection
+    retry_base_delay_seconds: 5.0 # Deterministic exponential backoff
+    retry_max_delay_seconds: 300.0
+    shutdown_timeout_seconds: 10.0 # Drain bound before durable work is abandoned for recovery
 
 # ============================================================================
 # Checkpointer Configuration (DEPRECATED — use `database` instead)
@@ -2418,6 +2439,10 @@ run_ownership:
 #     config:
 #       # A known role with no policy for a resource is unrestricted for it.
 #       # Define both `tools` and `routes` wherever access should be constrained.
+#       # Skill evolution uses independent `skill_evolution:read`,
+#       # `skill_evolution:review`, `skill_evolution:publish`, and
+#       # `skill_evolution:rollback` permissions. An explicit route allowlist
+#       # must include only the operations that role should perform.
 #       roles:
 #         admin:
 #           tools: {allow: "*"}

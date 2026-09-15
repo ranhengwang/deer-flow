@@ -58,9 +58,39 @@ def _make_minimal_config(tools):
     config.models = []
     config.tool_search.enabled = False
     config.skill_evolution.enabled = False
+    config.skill_evolution.publication.mode = "manual"
     config.sandbox = MagicMock()
     config.acp_agents = {}
     return config
+
+
+@patch("deerflow.tools.tools.is_host_bash_allowed", return_value=True)
+def test_direct_publication_does_not_expose_skill_manage(_mock_bash):
+    config = _make_minimal_config([])
+    config.skill_evolution.enabled = True
+    config.skill_evolution.publication.mode = "direct"
+
+    with patch("deerflow.tools.tools.BUILTIN_TOOLS", []):
+        result = get_available_tools(
+            include_mcp=False,
+            app_config=config,
+        )
+
+    assert "skill_manage" not in {tool.name for tool in result}
+
+
+@patch("deerflow.tools.tools.is_host_bash_allowed", return_value=True)
+def test_manual_publication_keeps_skill_manage_available(_mock_bash):
+    config = _make_minimal_config([])
+    config.skill_evolution.enabled = True
+
+    with patch("deerflow.tools.tools.BUILTIN_TOOLS", []):
+        result = get_available_tools(
+            include_mcp=False,
+            app_config=config,
+        )
+
+    assert "skill_manage" in {tool.name for tool in result}
 
 
 @patch("deerflow.tools.tools.get_app_config")

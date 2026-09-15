@@ -181,7 +181,7 @@ class SkillEvolutionGroupingConfig(BaseModel):
 
 
 class SkillEvolutionQualityConfig(BaseModel):
-    """Pass thresholds used before aggregate quality scoring exists."""
+    """Pass thresholds and sample gates for versioned quality scoring."""
 
     min_source_replay_success_rate: float = Field(
         default=1.0,
@@ -195,6 +195,137 @@ class SkillEvolutionQualityConfig(BaseModel):
         le=1.0,
         description="Minimum candidate success rate across held-out same-family tasks.",
     )
+    max_regression_rate: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Maximum old-success/new-failure rate across historical regression tasks.",
+    )
+    high_quality_threshold: float = Field(
+        default=0.75,
+        ge=0.0,
+        le=1.0,
+        description="Minimum aggregate v1 score required for a high-quality designation.",
+    )
+    min_total_candidate_tasks: int = Field(
+        default=5,
+        ge=1,
+        le=256,
+        description="Minimum candidate task count required for high-quality designation.",
+    )
+    min_held_out_tasks: int = Field(
+        default=2,
+        ge=1,
+        le=256,
+        description="Minimum held-out tasks required for a high-quality new Skill.",
+    )
+    min_regression_tasks: int = Field(
+        default=2,
+        ge=1,
+        le=256,
+        description="Minimum old-Skill-success regression pairs required for a high-quality patch.",
+    )
+    min_distinct_environments: int = Field(
+        default=2,
+        ge=1,
+        le=64,
+        description="Minimum distinct replay environments required for high-quality designation.",
+    )
+
+
+class SkillEvolutionPublicationConfig(BaseModel):
+    """Select evaluated or direct Skill publication behavior."""
+
+    mode: Literal["manual", "eligible_auto", "direct"] = Field(
+        default="manual",
+        description=("Publication workflow: manual requires explicit review, eligible_auto retains evaluation gates, and direct publishes a staged Proposal immediately after distillation while retaining mutation security checks."),
+    )
+    allow_non_executable_auto_publish: bool = Field(
+        default=False,
+        description="Allow policy approval of low-risk non-executable updates. This never publishes the Skill by itself.",
+    )
+    allow_executable_auto_publish: Literal[False] = Field(
+        default=False,
+        description="Executable auto-publication is forbidden in the first policy version.",
+    )
+    require_held_out_evaluation: Literal[True] = Field(
+        default=True,
+        description="Require successful candidate held-out results before a Proposal can be automatically approved.",
+    )
+    proposal_ttl_days: int = Field(
+        default=180,
+        ge=1,
+        le=730,
+        description="Fallback lifetime for legacy Proposals that do not persist an explicit expires_at value.",
+    )
+
+
+def is_skill_manage_enabled(skill_evolution_config: object | None) -> bool:
+    """Return whether lead agents may mutate Skills during their own run."""
+    if not getattr(skill_evolution_config, "enabled", False):
+        return False
+
+    publication = getattr(skill_evolution_config, "publication", None)
+    return getattr(publication, "mode", "manual") != "direct"
+
+
+class SkillEvolutionCoordinatorConfig(BaseModel):
+    """Restart-safe background job scheduling and shutdown bounds."""
+
+    queue_capacity: int = Field(
+        default=64,
+        ge=1,
+        le=4_096,
+        description="Maximum in-memory wake-up hints; durable SQL jobs are never dropped when this queue is full.",
+    )
+    max_concurrent_jobs: int = Field(
+        default=2,
+        ge=1,
+        le=32,
+        description="Maximum evolution jobs processed concurrently by one Gateway process.",
+    )
+    poll_interval_seconds: float = Field(
+        default=1.0,
+        gt=0.0,
+        le=60.0,
+        description="Database polling interval used for pending, retry, and expired-lease recovery.",
+    )
+    lease_seconds: float = Field(
+        default=120.0,
+        gt=0.0,
+        le=3_600.0,
+        description="Renewable claim lease for one background evolution job.",
+    )
+    max_attempts: int = Field(
+        default=5,
+        ge=1,
+        le=32,
+        description="Maximum claimed processing attempts before a job enters the dead state.",
+    )
+    retry_base_delay_seconds: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=3_600.0,
+        description="Initial deterministic exponential-backoff delay after a processing failure.",
+    )
+    retry_max_delay_seconds: float = Field(
+        default=300.0,
+        ge=0.0,
+        le=86_400.0,
+        description="Maximum deterministic exponential-backoff delay.",
+    )
+    shutdown_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0.0,
+        le=300.0,
+        description="Maximum Gateway shutdown drain time before local work is cancelled and left durable for recovery.",
+    )
+
+    @model_validator(mode="after")
+    def _validate_retry_delays(self) -> Self:
+        if self.retry_max_delay_seconds < self.retry_base_delay_seconds:
+            raise ValueError("retry_max_delay_seconds cannot be less than retry_base_delay_seconds")
+        return self
 
 
 class SkillEvolutionConfig(BaseModel):
@@ -231,4 +362,12 @@ class SkillEvolutionConfig(BaseModel):
     quality: SkillEvolutionQualityConfig = Field(
         default_factory=SkillEvolutionQualityConfig,
         description="Candidate evaluation thresholds. Aggregate scoring is configured separately when implemented.",
+    )
+    publication: SkillEvolutionPublicationConfig = Field(
+        default_factory=SkillEvolutionPublicationConfig,
+        description="Proposal approval and future publication gates.",
+    )
+    coordinator: SkillEvolutionCoordinatorConfig = Field(
+        default_factory=SkillEvolutionCoordinatorConfig,
+        description="Durable background coordinator settings captured at Gateway startup.",
     )

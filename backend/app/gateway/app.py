@@ -31,6 +31,7 @@ from app.gateway.routers import (
     models,
     runs,
     scheduled_tasks,
+    skill_evolution,
     skills,
     suggestions,
     thread_runs,
@@ -285,6 +286,45 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     async with langgraph_runtime(app, startup_config):
         logger.info("LangGraph runtime initialised")
 
+        try:
+            from deerflow.skill_evolution.coordinator import (
+                EvolutionCoordinator,
+            )
+            from deerflow.skill_evolution.observability import (
+                get_evolution_observability,
+            )
+            from deerflow.skill_evolution.publication import (
+                SkillPublicationService,
+            )
+            from deerflow.skill_evolution.worker import (
+                EvolutionPipelineProcessor,
+            )
+
+            evolution_observability = get_evolution_observability()
+            app.state.skill_evolution_observability = evolution_observability
+            app.state.skill_publication_service = SkillPublicationService(
+                store=app.state.skill_evolution_store,
+                observability=evolution_observability,
+            )
+            evolution_processor = EvolutionPipelineProcessor(
+                event_store=app.state.run_event_store,
+                evolution_store=app.state.skill_evolution_store,
+                app_config_provider=lambda: startup_config,
+                direct_publisher=(app.state.skill_publication_service.publish_direct),
+                observability=evolution_observability,
+            )
+            evolution_coordinator = EvolutionCoordinator(
+                store=app.state.skill_evolution_store,
+                processor=evolution_processor,
+                config=startup_config.skill_evolution.coordinator,
+                observability=evolution_observability,
+            )
+            app.state.evolution_coordinator = evolution_coordinator
+            if startup_config.skill_evolution.enabled:
+                await evolution_coordinator.start()
+        except Exception:
+            logger.exception("Failed to initialize Skill evolution services")
+
         # Check admin bootstrap state and migrate orphan threads after admin exists.
         # Must run AFTER langgraph_runtime so app.state.store is available for thread migration
         await _ensure_admin_user(app)
@@ -383,6 +423,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 await app.state.mcp_task_service.stop()
             except Exception:
                 logger.exception("Failed to stop MCP task service")
+
+        if getattr(app.state, "evolution_coordinator", None) is not None:
+            try:
+                drained = await app.state.evolution_coordinator.stop()
+                if not drained:
+                    logger.warning("Skill evolution shutdown exceeded its configured drain timeout; durable jobs will resume after restart")
+            except Exception:
+                logger.exception("Failed to stop Skill evolution coordinator")
 
         try:
             from deerflow.community.browser_automation import get_browser_session_manager
@@ -662,6 +710,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Skills API is mounted at /api/skills
     app.include_router(skills.router)
+
+    # Skill evolution API is mounted at /api/skill-evolution
+    app.include_router(skill_evolution.router)
 
     # First-party integrations API is mounted at /api/integrations
     app.include_router(integrations.router)

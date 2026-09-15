@@ -4,6 +4,7 @@ from langchain.tools import BaseTool
 
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
+from deerflow.config.skill_evolution_config import is_skill_manage_enabled
 from deerflow.reflection import resolve_variable
 from deerflow.sandbox.security import is_host_bash_allowed
 from deerflow.tools.builtins import ask_clarification_tool, list_uploaded_files, present_file_tool, review_skill_package, task_tool, view_image_tool
@@ -96,8 +97,7 @@ def get_available_tools(
     builtin_tools = BUILTIN_TOOLS.copy()
     if include_upload_tool:
         builtin_tools.append(list_uploaded_files)
-    skill_evolution_config = getattr(config, "skill_evolution", None)
-    if getattr(skill_evolution_config, "enabled", False):
+    if is_skill_manage_enabled(getattr(config, "skill_evolution", None)):
         from deerflow.tools.skill_manage_tool import skill_manage_tool
 
         builtin_tools.append(skill_manage_tool)

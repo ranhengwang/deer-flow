@@ -361,7 +361,15 @@ class UserScopedSkillStorage(LocalSkillStorage):
     # Write — ensure user custom dir exists before writing
     # ------------------------------------------------------------------
 
-    def write_custom_skill(self, name: str, relative_path: str, content: str) -> None:
+    def write_custom_skill(
+        self,
+        name: str,
+        relative_path: str,
+        content: str,
+        *,
+        expected_base_hash: str | None = None,
+        require_absent: bool = False,
+    ) -> None:
         # Ensure user custom skills directory exists
         self._user_custom_root.mkdir(parents=True, exist_ok=True)
         target = self.validate_relative_path(relative_path, self.get_custom_skill_dir(name))
@@ -376,6 +384,11 @@ class UserScopedSkillStorage(LocalSkillStorage):
             tmp_path = Path(tmp_file.name)
         try:
             with self._skill_projection_mutation():
+                self.assert_expected_base_hash(
+                    name,
+                    expected_base_hash,
+                    require_absent=require_absent,
+                )
                 tmp_path.replace(target)
                 make_skill_written_path_sandbox_readable(self.get_custom_skill_dir(name), target)
         except Exception:

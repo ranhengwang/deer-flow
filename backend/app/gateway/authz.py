@@ -25,6 +25,10 @@ Inspired by LangGraph Auth system: https://github.com/langchain-ai/langgraph/blo
 - runs:create   - Run agent
 - runs:read     - View run
 - runs:cancel   - Cancel run
+- skill_evolution:read - View owner-scoped Skill evolution records
+- skill_evolution:review - Approve or reject owned Skill Proposals
+- skill_evolution:publish - Publish approved owned Skill Proposals
+- skill_evolution:rollback - Roll back owned published Skill versions
 """
 
 from __future__ import annotations
@@ -65,6 +69,12 @@ class Permissions:
     RUNS_CREATE = "runs:create"
     RUNS_READ = "runs:read"
     RUNS_CANCEL = "runs:cancel"
+
+    # Skill evolution
+    SKILL_EVOLUTION_READ = "skill_evolution:read"
+    SKILL_EVOLUTION_REVIEW = "skill_evolution:review"
+    SKILL_EVOLUTION_PUBLISH = "skill_evolution:publish"
+    SKILL_EVOLUTION_ROLLBACK = "skill_evolution:rollback"
 
 
 class AuthContext:
@@ -124,6 +134,10 @@ _ALL_PERMISSIONS: list[str] = [
     Permissions.RUNS_CREATE,
     Permissions.RUNS_READ,
     Permissions.RUNS_CANCEL,
+    Permissions.SKILL_EVOLUTION_READ,
+    Permissions.SKILL_EVOLUTION_REVIEW,
+    Permissions.SKILL_EVOLUTION_PUBLISH,
+    Permissions.SKILL_EVOLUTION_ROLLBACK,
 ]
 
 

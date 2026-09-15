@@ -16,8 +16,17 @@ from pathlib import Path
 
 from deerflow.config.runtime_paths import resolve_path
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
-from deerflow.skills.permissions import make_skill_written_path_sandbox_readable
-from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, SkillStorage
+from deerflow.skills.package import (
+    SkillPackageFile,
+    compute_skill_package_hash,
+    materialize_skill_package,
+    read_skill_package,
+)
+from deerflow.skills.permissions import (
+    make_skill_tree_sandbox_readable,
+    make_skill_written_path_sandbox_readable,
+)
+from deerflow.skills.storage.skill_storage import SKILL_MD_FILE, SkillStorage, SkillStorageConflict
 from deerflow.skills.types import SkillCategory
 
 logger = logging.getLogger(__name__)
@@ -97,7 +106,15 @@ class LocalSkillStorage(SkillStorage):
             raise FileNotFoundError(f"Custom skill '{name}' not found.")
         return (self.get_custom_skill_dir(name) / SKILL_MD_FILE).read_text(encoding="utf-8")
 
-    def write_custom_skill(self, name: str, relative_path: str, content: str) -> None:
+    def write_custom_skill(
+        self,
+        name: str,
+        relative_path: str,
+        content: str,
+        *,
+        expected_base_hash: str | None = None,
+        require_absent: bool = False,
+    ) -> None:
         target = self.validate_relative_path(relative_path, self.get_custom_skill_dir(name))
         target.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
@@ -110,16 +127,115 @@ class LocalSkillStorage(SkillStorage):
             tmp_path = Path(tmp_file.name)
         try:
             with self._skill_projection_mutation():
+                self.assert_expected_base_hash(
+                    name,
+                    expected_base_hash,
+                    require_absent=require_absent,
+                )
                 tmp_path.replace(target)
                 make_skill_written_path_sandbox_readable(self.get_custom_skill_dir(name), target)
         except Exception:
             tmp_path.unlink(missing_ok=True)
             raise
 
-    def remove_custom_skill_file(self, name: str, relative_path: str) -> str:
+    def replace_custom_skill_package(
+        self,
+        name: str,
+        files: tuple[SkillPackageFile, ...],
+        *,
+        expected_base_hash: str | None = None,
+        expected_package_hash: str | None = None,
+        require_absent: bool = False,
+        history_record: dict | None = None,
+    ) -> None:
+        name = self.validate_skill_name(name)
+        target = self.get_custom_skill_dir(name)
+        target.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        staging_root = Path(
+            tempfile.mkdtemp(
+                prefix=f".{name}-package-",
+                dir=target.parent,
+            )
+        )
+        staged = staging_root / "candidate"
+        backup = staging_root / "previous"
+        if files:
+            materialize_skill_package(
+                staged,
+                files,
+            )
+
+        removal = ((SkillCategory.CUSTOM, Path(name)),)
+        swapped = False
+        try:
+            with self._skill_projection_mutation(remove=removal):
+                self.assert_expected_base_hash(
+                    name,
+                    expected_base_hash,
+                    require_absent=require_absent,
+                )
+                if expected_package_hash is not None:
+                    if not target.exists():
+                        raise SkillStorageConflict(f"Skill package hash conflict for '{name}': custom skill no longer exists.")
+                    current_package_hash = compute_skill_package_hash(read_skill_package(target))
+                    if current_package_hash != expected_package_hash:
+                        raise SkillStorageConflict(f"Skill package hash conflict for '{name}'.")
+
+                if target.exists():
+                    target.replace(backup)
+                    swapped = True
+                if files:
+                    staged.replace(target)
+                    swapped = True
+                    make_skill_tree_sandbox_readable(target)
+                else:
+                    swapped = True
+                try:
+                    if history_record is not None:
+                        self.append_history(
+                            name,
+                            history_record,
+                        )
+                except Exception:
+                    if target.exists():
+                        shutil.rmtree(target)
+                    if backup.exists():
+                        backup.replace(target)
+                    swapped = False
+                    raise
+        except Exception:
+            if swapped:
+                if target.exists():
+                    shutil.rmtree(target)
+                if backup.exists():
+                    backup.replace(target)
+            raise
+        finally:
+            shutil.rmtree(
+                staging_root,
+                ignore_errors=True,
+            )
+
+    def remove_custom_skill_file(
+        self,
+        name: str,
+        relative_path: str,
+        *,
+        expected_base_hash: str | None = None,
+    ) -> str:
         removal = ((SkillCategory.CUSTOM, Path(name)),)
         with self._skill_projection_mutation(remove=removal):
-            return super().remove_custom_skill_file(name, relative_path)
+            self.assert_expected_base_hash(
+                name,
+                expected_base_hash,
+            )
+            return super().remove_custom_skill_file(
+                name,
+                relative_path,
+            )
 
     async def ainstall_skill_from_archive(self, archive_path: str | Path) -> dict:
         from deerflow.skills.installer import _scan_skill_archive_contents_or_raise
@@ -218,24 +334,44 @@ class LocalSkillStorage(SkillStorage):
                 _move_staged_skill_into_reserved_target(staging_target, target)
             make_skill_written_path_sandbox_readable(custom_dir, target)
 
-    def delete_custom_skill(self, name: str, *, history_meta: dict | None = None) -> None:
+    def delete_custom_skill(
+        self,
+        name: str,
+        *,
+        history_meta: dict | None = None,
+        expected_base_hash: str | None = None,
+    ) -> None:
         self.validate_skill_name(name)
         self.ensure_custom_skill_is_editable(name)
         target = self.get_custom_skill_dir(name)
-        if history_meta is not None:
-            prev_content = self.read_custom_skill(name)
-            try:
-                self.append_history(name, {**history_meta, "prev_content": prev_content})
-            except OSError as e:
-                if not isinstance(e, PermissionError) and e.errno not in {errno.EACCES, errno.EPERM, errno.EROFS}:
-                    raise
-                logger.warning(
-                    "Skipping delete history write for custom skill %s due to readonly/permission failure; continuing with skill directory removal: %s",
-                    name,
-                    e,
-                )
         removal = ((SkillCategory.CUSTOM, Path(name)),)
         with self._skill_projection_mutation(remove=removal):
+            self.assert_expected_base_hash(
+                name,
+                expected_base_hash,
+            )
+            if history_meta is not None:
+                prev_content = self.read_custom_skill(name)
+                try:
+                    self.append_history(
+                        name,
+                        {
+                            **history_meta,
+                            "prev_content": prev_content,
+                        },
+                    )
+                except OSError as e:
+                    if not isinstance(e, PermissionError) and e.errno not in {
+                        errno.EACCES,
+                        errno.EPERM,
+                        errno.EROFS,
+                    }:
+                        raise
+                    logger.warning(
+                        "Skipping delete history write for custom skill %s due to readonly/permission failure; continuing with skill directory removal: %s",
+                        name,
+                        e,
+                    )
             if target.exists():
                 shutil.rmtree(target)
 

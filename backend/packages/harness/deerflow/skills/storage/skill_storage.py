@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import logging
 import re
 from abc import ABC, abstractmethod
@@ -10,11 +11,20 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+from deerflow.skills.package import (
+    SkillPackageFile,
+    compute_skill_package_hash,
+    read_skill_package,
+)
 from deerflow.skills.types import SKILL_MD_FILE, Skill, SkillCategory  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
 _SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+class SkillStorageConflict(ValueError):
+    """Raised when a compare-and-swap Skill mutation sees stale content."""
 
 
 class SkillStorage(ABC):
@@ -149,14 +159,78 @@ class SkillStorage(ABC):
         """
 
     @abstractmethod
-    def write_custom_skill(self, name: str, relative_path: str, content: str) -> None:
+    def write_custom_skill(
+        self,
+        name: str,
+        relative_path: str,
+        content: str,
+        *,
+        expected_base_hash: str | None = None,
+        require_absent: bool = False,
+    ) -> None:
         """Atomically write a text file under ``custom/<name>/<relative_path>``.
 
         Origin: ``deerflow.skills.manager.atomic_write``.
         """
 
-    def remove_custom_skill_file(self, name: str, relative_path: str) -> str:
+    def replace_custom_skill_package(
+        self,
+        name: str,
+        files: tuple[SkillPackageFile, ...],
+        *,
+        expected_base_hash: str | None = None,
+        expected_package_hash: str | None = None,
+        require_absent: bool = False,
+        history_record: dict | None = None,
+    ) -> None:
+        """Replace or delete one complete custom-Skill package under one write lock."""
+        raise NotImplementedError("complete Skill package replacement is not supported by this storage")
+
+    def current_custom_skill_hash(self, name: str) -> str:
+        """Return the SHA-256 identity of the current custom ``SKILL.md``."""
+        return hashlib.sha256(self.read_custom_skill(name).encode("utf-8")).hexdigest()
+
+    def current_custom_skill_package_hash(self, name: str) -> str:
+        """Return the binary-safe identity of the complete custom Skill package."""
+        return compute_skill_package_hash(
+            read_skill_package(
+                self.get_custom_skill_dir(name),
+            )
+        )
+
+    def assert_expected_base_hash(
+        self,
+        name: str,
+        expected_base_hash: str | None,
+        *,
+        require_absent: bool = False,
+    ) -> str | None:
+        """Validate an optional Skill CAS token and return the current hash."""
+        if require_absent:
+            if self.custom_skill_exists(name):
+                raise SkillStorageConflict(f"Skill base hash conflict for '{name}': custom skill already exists.")
+            return None
+        if expected_base_hash is None:
+            if not self.custom_skill_exists(name):
+                return None
+            return self.current_custom_skill_hash(name)
+        try:
+            current_hash = self.current_custom_skill_hash(name)
+        except FileNotFoundError as exc:
+            raise SkillStorageConflict(f"Skill base hash conflict for '{name}': custom skill no longer exists.") from exc
+        if current_hash != expected_base_hash:
+            raise SkillStorageConflict(f"Skill base hash conflict for '{name}'.")
+        return current_hash
+
+    def remove_custom_skill_file(
+        self,
+        name: str,
+        relative_path: str,
+        *,
+        expected_base_hash: str | None = None,
+    ) -> str:
         """Remove a supporting file and return its previous text content."""
+        self.assert_expected_base_hash(name, expected_base_hash)
         target = self.ensure_safe_support_path(name, relative_path)
         if not target.exists():
             raise FileNotFoundError(f"Supporting file '{relative_path}' not found for skill '{name}'.")
@@ -178,7 +252,13 @@ class SkillStorage(ABC):
         return _run_async_install(self.ainstall_skill_from_archive(archive_path))
 
     @abstractmethod
-    def delete_custom_skill(self, name: str, *, history_meta: dict | None = None) -> None:
+    def delete_custom_skill(
+        self,
+        name: str,
+        *,
+        history_meta: dict | None = None,
+        expected_base_hash: str | None = None,
+    ) -> None:
         """Delete a custom skill (validation + optional history + directory removal).
 
         Origin: ``app.gateway.routers.skills.delete_custom_skill`` + ``skill_manage_tool``.

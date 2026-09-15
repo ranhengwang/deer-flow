@@ -85,7 +85,8 @@ The implementation and experiments should answer:
 - Learning from unverified task outcomes.
 - Treating model self-reported success as authoritative.
 - Synchronously distilling and evaluating skills on the user request path.
-- Fully autonomous publication of executable skill packages.
+- Making direct publication the distributed default; it remains an explicit
+  operator opt-in because it bypasses effectiveness evaluation and approval.
 
 ## 5. Core Invariants
 
@@ -98,8 +99,9 @@ The implementation and experiments should answer:
    attempts from one run.
 4. **No direct public-skill mutation.** Public and integration skills remain
    read-only. Updates create a per-user custom shadow or a separate candidate.
-5. **No direct publication from the distiller.** Distillation produces a staged
-   proposal. Evaluation and approval precede publication.
+5. **No Skill writes inside the distiller.** Distillation always persists a staged
+   proposal first. `manual` and `eligible_auto` keep evaluation/approval gates;
+   explicit `direct` mode hands the staged Proposal to the separate publisher.
 6. **`skill_manage` remains the mutation boundary.** The new subsystem may reuse
    its validation/publishing service, but must not bypass path validation,
    SkillScan, LLM moderation, history, or cache refresh.
@@ -112,7 +114,7 @@ The implementation and experiments should answer:
 10. **Online latency isolation.** Run completion may enqueue evolution work, but
     extraction, clustering, distillation, and replay must run asynchronously.
 11. **Version and rollback.** Every published update records its base version,
-    candidate version, evaluation, and a reversible snapshot.
+    candidate version, optional evaluation identity, and a reversible snapshot.
 12. **Configuration off means no behavior change.**
 
 ## 6. Target Architecture
@@ -359,7 +361,7 @@ skill_evolution:
     llm_confirmation: true
 
   publication:
-    mode: manual
+    mode: manual # manual | eligible_auto | direct
     allow_non_executable_auto_publish: false
     allow_executable_auto_publish: false
     require_held_out_evaluation: true
@@ -736,10 +738,10 @@ Acceptance:
 
 #### Task 6.3: Evaluate skill updates
 
-- [ ] Run old-skill and new-skill paired evaluations.
-- [ ] Include historical regression tasks for the base skill.
-- [ ] Reject updates above configured regression rate.
-- [ ] Require manual review for executable supporting-file changes.
+- [x] Run old-skill and new-skill paired evaluations.
+- [x] Include historical regression tasks for the base skill.
+- [x] Reject updates above configured regression rate.
+- [x] Require manual review for executable supporting-file changes.
 
 #### Task 6.4: Compute skill quality
 
@@ -756,9 +758,9 @@ regression rate
 safety risk
 ```
 
-- [ ] Store raw metrics separately from aggregate quality score.
-- [ ] Version the scoring formula.
-- [ ] Require minimum sample counts before assigning "high quality".
+- [x] Store raw metrics separately from aggregate quality score.
+- [x] Version the scoring formula.
+- [x] Require minimum sample counts before assigning "high quality".
 
 Acceptance:
 
@@ -774,10 +776,10 @@ Files:
 - Keep the LangChain tool as a thin adapter.
 - Add mutation-service tests plus existing tool regressions.
 
-- [ ] Preserve validation, per-user locking, SkillScan, LLM moderation, history,
+- [x] Preserve validation, per-user locking, SkillScan, LLM moderation, history,
       and cache refresh.
-- [ ] Add expected base hash/version for compare-and-swap publication.
-- [ ] Add proposal and evaluation IDs to mutation history.
+- [x] Add expected base hash/version for compare-and-swap publication.
+- [x] Add proposal and evaluation IDs to mutation history.
 
 Acceptance:
 
@@ -786,18 +788,18 @@ Acceptance:
 
 #### Task 7.2: Add proposal approval policy
 
-- [ ] Default to manual approval.
-- [ ] Allow future auto-publication only for non-executable, low-risk changes with
+- [x] Default to manual approval.
+- [x] Allow future auto-publication only for non-executable, low-risk changes with
       passing held-out evaluation.
-- [ ] Never auto-publish executable files in the first version.
-- [ ] Add explicit rejection reason and proposal expiration.
+- [x] Never auto-publish executable files in the first version.
+- [x] Add explicit rejection reason and proposal expiration.
 
 #### Task 7.3: Add version snapshots and rollback
 
-- [ ] Snapshot all skill package files before publication.
-- [ ] Record base and published hashes.
-- [ ] Add rollback operation that creates a new history entry.
-- [ ] Re-run security checks before restoring executable content.
+- [x] Snapshot all skill package files before publication.
+- [x] Record base and published hashes.
+- [x] Add rollback operation that creates a new history entry.
+- [x] Re-run security checks before restoring executable content.
 
 Acceptance:
 
@@ -814,11 +816,11 @@ Files:
 - Create `deerflow/skill_evolution/worker.py`.
 - Add lifecycle and shutdown tests.
 
-- [ ] Enqueue eligible run IDs after durable run finalization.
-- [ ] Keep extraction/distillation off the request event loop.
-- [ ] Use bounded queues, retries, backoff, and idempotency keys.
-- [ ] Persist state before acknowledging work.
-- [ ] Drain or safely abandon work during shutdown according to configured timeout.
+- [x] Enqueue eligible run IDs after durable run finalization.
+- [x] Keep extraction/distillation off the request event loop.
+- [x] Use bounded queues, retries, backoff, and idempotency keys.
+- [x] Persist state before acknowledging work.
+- [x] Drain or safely abandon work during shutdown according to configured timeout.
 
 Acceptance:
 
@@ -827,27 +829,27 @@ Acceptance:
 
 #### Task 8.2: Add observability
 
-- [ ] Emit events for admitted, rejected, extracted, clustered, ready, distilled,
+- [x] Emit events for admitted, rejected, extracted, clustered, ready, distilled,
       evaluated, approved, published, rejected, and rolled back.
-- [ ] Add metrics for queue depth, extraction failures, cluster purity samples,
+- [x] Add metrics for queue depth, extraction failures, cluster purity samples,
       proposal pass rate, publication rate, regression rate, and quality lift.
-- [ ] Log IDs and hashes, not raw sensitive content.
+- [x] Log IDs and hashes, not raw sensitive content.
 
 ### Phase 9: API and Minimal Review Surface
 
 #### Task 9.1: Add read-only APIs
 
-- [ ] List events, clusters, proposals, evaluations, and skill versions per user.
-- [ ] Enforce ownership and admin rules.
-- [ ] Paginate all collections.
-- [ ] Return compact/redacted data by default.
+- [x] List events, clusters, proposals, evaluations, and skill versions per user.
+- [x] Enforce ownership and admin rules.
+- [x] Paginate all collections.
+- [x] Return compact/redacted data by default.
 
 #### Task 9.2: Add approval and rollback APIs
 
-- [ ] Approve/reject proposals.
-- [ ] Publish approved proposals.
-- [ ] Roll back published versions.
-- [ ] Protect all mutations with CSRF/authz/ownership checks.
+- [x] Approve/reject proposals.
+- [x] Publish approved proposals.
+- [x] Roll back published versions.
+- [x] Protect all mutations with CSRF/authz/ownership checks.
 
 Frontend UI is optional for the first research milestone; APIs plus CLI are sufficient.
 
@@ -855,23 +857,23 @@ Frontend UI is optional for the first research milestone; APIs plus CLI are suff
 
 #### Task 10.1: Record selection actions
 
-- [ ] Record generated search query, candidate skill IDs/hashes, rank scores,
+- [x] Record generated search query, candidate skill IDs/hashes, rank scores,
       selected skill, and no-skill decision.
-- [ ] Record policy model and prompt version.
-- [ ] Record log probabilities only when the provider exposes them reliably.
+- [x] Record policy model and prompt version.
+- [x] Record log probabilities only when the provider exposes them reliably.
 
 #### Task 10.2: Record utilization evidence
 
-- [ ] Record activation source, loaded skill version, relevant tool calls,
+- [x] Record activation source, loaded skill version, relevant tool calls,
       deviations, outcome reward, and cost.
-- [ ] Do not infer instruction adherence from text matching alone; retain it as
+- [x] Do not infer instruction adherence from text matching alone; retain it as
       an optional model-derived feature.
 
 #### Task 10.3: Record distillation evidence
 
-- [ ] Link proposal to source events and future tasks using the published version.
-- [ ] Compute delayed marginal utility after sufficient future evaluations.
-- [ ] Preserve raw outcome series for alternative credit formulas.
+- [x] Link proposal to source events and future tasks using the published version.
+- [x] Compute delayed marginal utility after sufficient future evaluations.
+- [x] Preserve raw outcome series for alternative credit formulas.
 
 Initial non-training signals:
 
@@ -889,11 +891,11 @@ Acceptance:
 
 #### Task 11.1: Run ablations
 
-- [ ] `K=1` vs `K=3` vs `K=5`.
-- [ ] deterministic grouping vs LLM grouping vs hybrid.
-- [ ] immediate publish vs staged evaluation.
-- [ ] success path only vs success path plus recovered failures.
-- [ ] no-skill creation branch vs existing-skill patch branch.
+- [x] `K=1` vs `K=3` vs `K=5`.
+- [x] deterministic grouping vs LLM grouping vs hybrid.
+- [x] immediate publish vs staged evaluation.
+- [x] success path only vs success path plus recovered failures.
+- [x] no-skill creation branch vs existing-skill patch branch.
 
 #### Task 11.2: Report metrics
 
@@ -916,10 +918,31 @@ Secondary:
 
 #### Task 11.3: Statistical analysis
 
-- [ ] Use paired tasks/seeds for old/new/no-skill comparisons.
-- [ ] Report confidence intervals.
-- [ ] Separate task-family and aggregate results.
-- [ ] Publish failed and rejected proposal counts, not only successful cases.
+- [x] Use paired tasks/seeds for old/new/no-skill comparisons.
+- [x] Report confidence intervals.
+- [x] Separate task-family and aggregate results.
+- [x] Publish failed and rejected proposal counts, not only successful cases.
+
+Implementation status:
+
+- The frozen 60-task manifest, 12-condition ablation matrix, executor protocol,
+  JSONL result contract, paired bootstrap intervals, exact McNemar test, and
+  aggregate/per-family reports are implemented.
+- A full 2,160-row `deterministic_smoke` matrix validates the experiment plumbing.
+- A production suite now materializes all 60 tasks with hidden deterministic
+  verifiers. `DockerReplayRuntime` runs model-selected tools in disposable,
+  network-disabled/read-only-rootfs containers with read-only Skill mounts.
+- The generated-candidate executor uses real deterministic/LLM/hybrid grouping,
+  Qwen distillation for both create and patch branches, staged source replay, and
+  held-out execution. Cohort-level checkpoints make the long run resumable.
+- The completed `production_replay` matrix contains 2,160 unique rows for Qwen3 8B
+  digest `500a1f067a9f782620b40bee6f7b0c89e17ae61f686b92c24933e4ca4b2b8b41`.
+  Its report contains 12 conditions, 12 family sections, and 11 paired
+  comparisons. Smoke and production rows remain schema-separated.
+- The result does not demonstrate an aggregate K=3 lift over no evolution on this
+  suite: both held-out rates are `0.6667`. It does show that immediate publication
+  is worse than K=3 staged evaluation by `-0.0833` held-out success
+  (95% paired-bootstrap CI `[-0.1528, -0.0278]`, exact McNemar `p=0.03125`).
 
 ### Phase 12: Deferred RL and Skill Internalization
 
@@ -1022,9 +1045,9 @@ Resolve before the corresponding phase:
 - [x] Is manual approval required for every new skill in the research prototype?
 - [x] Which embedding provider, if any, is part of the reproducible baseline?
 - [x] How long are raw snapshots retained after structured extraction?
-- [ ] What minimum held-out sample count is required for a high-quality designation?
+- [x] What minimum held-out sample count is required for a high-quality designation?
 - [ ] Can a custom skill shadow a public skill automatically, or only after approval?
-- [ ] What is the exact formula for aggregate skill quality?
+- [x] What is the exact formula for aggregate skill quality?
 
 ## 13. Decision Log
 
@@ -1055,6 +1078,21 @@ Append decisions; do not rewrite historical entries.
 - **Decision:** The initial benchmark contains repository repair, structured data
   transformation, and shell/environment workflows, with at least four task families
   per domain, three evidence variants and two held-out variants per family.
+
+### 2026-08-30 — Explicit Direct Publication Mode
+
+- **Decision:** Add `skill_evolution.publication.mode=direct` for operators who
+  intentionally defer effectiveness measurement to offline experiments.
+- **Decision:** Direct mode publishes a staged K-ready Proposal immediately and
+  creates no synthetic `SkillEvaluation` or approval record.
+- **Decision:** Direct mode still uses `SkillPublicationService` and
+  `SkillMutationService`; path/package validation, SkillScan, LLM security
+  moderation, base/package CAS, atomic replacement, history, snapshots, Credit,
+  and rollback remain mandatory.
+- **Decision:** `manual` remains the distributed default. The local development
+  configuration may opt into `direct`.
+- **Decision:** A direct publication persists `evaluation_id=null` so audit APIs
+  distinguish a skipped gate from an evaluated approval.
 
 ### 2026-08-16 — Phase 0 and Task 1.1
 
@@ -1359,6 +1397,340 @@ Append decisions; do not rewrite historical entries.
   wired yet. Existing-Skill regression evaluation starts in Task 6.3, aggregate
   quality remains Task 6.4, and no Skill is approved or published here.
 
+### 2026-08-17 — Phase 6 Task 6.3 / Existing-Skill Patch Evaluation
+
+- **Decision:** Patch evaluation requires a complete, same-user `ReplaySkillPackage`
+  whose exact `SKILL.md` hash equals the Proposal `base_skill_hash`. Replay files use
+  content-preserving validation so leading/trailing bytes cannot silently change the
+  CAS identity.
+- **Decision:** The candidate package is built in memory by overlaying Proposal files
+  on the complete base package. Old and candidate packages are materialized read-only
+  in separate disposable workspaces; production Skill storage is never mounted or
+  modified.
+- **Decision:** Regression rate is the number of historical tasks where the old Skill
+  succeeded and the candidate failed, divided by historical tasks where the old Skill
+  succeeded. Old-Skill failures do not count as candidate regressions, and a suite
+  with no successful old-Skill regression sample requires manual review.
+- **Completed:** Added `base_skill` replay condition and shared source/regression
+  runner orchestration. Source tasks exactly cover supporting evidence; historical
+  regression tasks are independent, unique, and user-scoped.
+- **Completed:** Added configurable `max_regression_rate` under
+  `skill_evolution.quality` with fail-closed default `0.0`, bumping example/local
+  configuration from version 40 to 41.
+- **Completed:** Added patch evaluation IDs, raw base/candidate/source/regression
+  results, source pass rate, regression sample/rate, artifact/metric/error retention,
+  Store idempotency, and rejected Proposal transitions.
+- **Completed:** Missing regression tasks, incomplete base packages, no successful
+  old-Skill regression sample, Proposal review flags, and executable supporting-file
+  changes require manual review. Source failure, side-effect violation, and excessive
+  regression reject.
+- **Completed:** `SkillEvaluation` approval now accepts either held-out results for a
+  new Skill or regression results for an existing-Skill patch; aggregate quality
+  remains deferred.
+- **Evidence:** Sixteen focused tests cover exact content/hash preservation, package
+  merge, user/hash mismatch, old/new source and regression pairs, configured
+  thresholds, old-failure exclusion, incomplete/missing samples, manual-only tasks,
+  executable changes, idempotency, and Proposal state transitions.
+- **Evidence:** All Skill evolution/config tests passed with 224 tests and one skip;
+  worker/config/event-contract regression passed with 103 tests; the complete backend
+  offline suite passed with 11,451 tests and 77 skips.
+- **Boundary:** Patch evaluation is explicitly callable with a complete base package
+  and conforming `ReplayRuntime`. The worker/coordinator still does not assemble
+  suites or invoke it automatically. Aggregate quality, approval, publication, and
+  rollback remain later phases.
+
+### 2026-08-17 — Phase 6 Task 6.4 / Versioned Skill Quality
+
+- **Decision:** `skill-quality-v1` is deterministic and model-free. It stores eight
+  independent dimensions: success lift (`0.25`), held-out generalization (`0.20`),
+  tool-call reduction (`0.10`), token reduction (`0.10`), latency reduction (`0.10`),
+  environment robustness (`0.10`), regression resistance (`0.10`), and safety
+  (`0.05`).
+- **Decision:** Success lift and efficiency deltas in `[-1, 1]` use symmetric
+  normalization `(value + 1) / 2`. Held-out success and worst-environment success are
+  direct scores. Regression resistance is `1 - regression_rate`; safety is
+  `1 - risk`. Unavailable dimensions are excluded from the weight denominator rather
+  than treated as zero.
+- **Decision:** A high-quality designation requires an approved evaluation, aggregate
+  score at least `0.75`, no safety/review blocker, at least five candidate tasks, two
+  held-out tasks for a new Skill or two old-success regression pairs for a Patch, and
+  at least two distinct environment fingerprints. Three source runs alone can never
+  qualify.
+- **Completed:** Added immutable `SkillQualityDimension` and `SkillQualityReport`
+  contracts with formula version, raw derived value, normalized score, weight, sample
+  count, aggregate, designation, sample counts, and explicit blockers.
+- **Completed:** Added deterministic `compute_skill_quality()` and
+  `apply_skill_quality()`. Raw task metrics/results remain unchanged and separate;
+  only the report and indexed `quality_score` are added to the evaluation.
+- **Completed:** Added environment fingerprints to raw task results and integrated
+  scoring into both new-Skill and Patch evaluators, including manual/rejected results.
+  Evaluator identity versions advanced to v2 and include the quality formula version.
+- **Completed:** Failed candidate/base pairs cannot earn efficiency gains. Malformed
+  unpaired raw results fail closed. Model validation prevents forged high-quality
+  reports with insufficient samples, blockers, low score, or non-approved decisions.
+- **Completed:** Added high-quality threshold and sample gates under
+  `skill_evolution.quality`, bumping example/local configuration from version 41 to
+  42.
+- **Evidence:** Thirteen focused quality tests cover all dimensions, both Proposal
+  branches, exact formula metadata, high-quality assignment, source-only/held-out/
+  environment insufficiency, regression, safety, failed-pair efficiency, raw-result
+  immutability, malformed pairing, model forgery, and configurable threshold.
+- **Evidence:** Quality/evaluator/model/store/config focused tests passed with 99
+  tests; all Skill evolution/config tests passed with 238 tests and one skip;
+  worker/config/event-contract regression passed with 104 tests; the complete backend
+  offline suite passed with 11,465 tests and 77 skips.
+- **Boundary:** Quality is calculated per persisted evaluation and does not itself
+  approve or publish a Skill. Cross-evaluation longitudinal stability and RL
+  internalization remain later work; the worker/coordinator still does not invoke the
+  evolution pipeline automatically.
+
+### 2026-08-17 — Phase 7 Task 7.1 / Reusable Skill Mutation Service
+
+- **Decision:** `deerflow.skills.mutation.SkillMutationService` is the shared security
+  and persistence boundary for both manual agent mutations and future Evolution
+  publication. Callers may not write Proposal content directly through storage.
+- **Decision:** A supplied `expected_base_hash` is checked before security scanning
+  for fast stale-Proposal rejection and checked again inside the final
+  cross-process Skill projection/storage write lock. The second check is authoritative
+  and closes the scan-time TOCTOU window. Create uses the same locked boundary with
+  `require_absent=True`.
+- **Decision:** Manual `skill_manage` requests retain their existing tool schema and
+  do not require CAS metadata. Evolution-authored requests require paired
+  `proposal_id` and `evaluation_id` values, which are written with the expected,
+  previous, and resulting Skill hashes into mutation history.
+- **Completed:** Extracted create, patch, edit, delete, support-file write, and
+  support-file removal into the reusable service while preserving Skill-name/content/
+  path validation, per-user/per-Skill serialization, full-candidate SkillScan, LLM
+  moderation, history, projection rebuilds, and prompt-cache refresh.
+- **Completed:** Reduced `skill_manage_tool.py` to a runtime adapter that resolves the
+  user/thread and delegates to the service. Existing scanner injection points and
+  response/error behavior remain compatible with the existing tool tests.
+- **Completed:** Added storage CAS inputs and `SkillStorageConflict` handling to local
+  and user-scoped writes and deletes. Atomic replacement, CAS validation, and
+  projection mutation now share the same write lock.
+- **Evidence:** Twelve mutation-service tests and ten existing `skill_manage` tests
+  pass. The focused Skill security/router/storage/projection suite passes with 277
+  tests, and the complete backend offline suite passes with 11,477 tests and 77 skips.
+- **Evidence:** Removing the final storage-layer CAS caused
+  `test_atomic_cas_catches_drift_during_security_scan` to fail and allowed a competing
+  write to be silently overwritten. Restoring the locked CAS returned the test to
+  green; a separate concurrent-create test proves `require_absent=True`.
+- **Boundary:** This task provides the safe mutation primitive only. No approval
+  policy or Evolution publisher calls it yet, and no Proposal is automatically
+  published. Approval policy begins in Task 7.2; package snapshots and rollback begin
+  in Task 7.3.
+
+### 2026-08-17 — Phase 7 Task 7.2 / Proposal Approval Policy
+
+- **Decision:** `skill-approval-v1` is deterministic and model-free. The default
+  `skill_evolution.publication.mode=manual` leaves an evaluated Proposal in
+  `validating` until an identified human reviewer approves or rejects it.
+- **Decision:** The opt-in `eligible_auto` mode can only move a Patch Proposal to
+  `approved`; it never publishes. Eligibility requires the non-executable auto flag,
+  no executable file, no Proposal risk or manual-review marker, no evaluation safety
+  blocker, an approved evaluation, and candidate held-out results that all succeed.
+  New-Skill creation remains manual in v1.
+- **Decision:** `allow_executable_auto_publish` is typed as the literal `false`, and
+  `require_held_out_evaluation` as the literal `true`. Configuration cannot weaken
+  either v1 safety invariant.
+- **Decision:** New Proposals persist `expires_at=created_at+180 days`; legacy
+  Proposals use the configured 180-day fallback. Expiration is evaluated before
+  automatic or manual approval, and an approved-but-unpublished Proposal can still
+  expire.
+- **Completed:** Added immutable approval assessments, manual approval requests, and
+  idempotent policy results. Manual approval can resolve evaluation/manual-review
+  blockers, including inspected executable content, but cannot override a rejected
+  evaluation.
+- **Completed:** Added append-only `ProposalStatusTransition` metadata to Proposal
+  JSON payloads. Each transition records source, reason code/detail, timestamp,
+  evaluation ID, reviewer ID when applicable, and policy version. Store transitions
+  retain status CAS in both memory and SQL implementations; no schema migration was
+  required.
+- **Completed:** Evaluators now record `evaluation_started` and explicit
+  `evaluation_rejected` transitions. Identical concurrent approvals collapse to one
+  write and one idempotent winner read; conflicting outcomes still fail CAS.
+- **Completed:** Added `skill_evolution.publication` configuration and bumped example
+  and local config from version 42 to 43.
+- **Evidence:** Eleven approval-policy tests cover default manual behavior, safe opt-in
+  approval, new-Skill/manual and executable/manual invariants, risk and held-out
+  blockers, rejection reasons, pending/approved expiration, human approve/reject,
+  ownership, and concurrent idempotency. Approval plus memory/SQL Store tests pass
+  with 32 tests, including legacy terminal payload compatibility.
+- **Evidence:** The complete backend offline suite passes with 11,491 tests and 77
+  skips.
+- **Evidence:** Removing the executable-file gate caused
+  `test_executable_change_can_never_be_auto_approved` to fail because an executable
+  Proposal became `approved`. Restoring the gate returned the test to green.
+- **Boundary:** Phase 7.2 persists approval state only. There is no approval API,
+  background approval invocation, publication snapshot, rollback, or mutation-service
+  call. `approved` is not `published`; Phase 7.3 owns package snapshots, publication,
+  and rollback.
+
+### 2026-08-17 — Phase 7 Task 7.3 / Versioned Publication and Rollback
+
+- **Decision:** Version snapshots are binary-safe complete packages, not only
+  `SKILL.md`. Each sorted file record stores normalized path, exact base64 bytes,
+  byte size, SHA-256, and executable bit. The snapshot stores `SKILL.md` and package
+  hashes and rejects symlinks, unsupported entries, traversal, more than 256 files,
+  files over 8 MiB, or packages over 32 MiB.
+- **Decision:** Candidate security preflight completes before snapshot bytes enter
+  the SQL publication record. Final package mutation repeats the same security
+  boundary before storage CAS, so scanner failure cannot persist a sensitive or
+  unsafe candidate and scan-time package drift cannot be overwritten.
+- **Decision:** Publication uses durable states `preparing -> published ->
+  rolled_back`. The Proposal separately reserves `approved -> publishing` before
+  mutation, then becomes `published`; rollback records `published -> rolled_back`.
+  Reservation prevents expiration/rejection from racing an active publisher.
+- **Decision:** The persisted `preparing` record contains both base and deterministic
+  candidate snapshots before any Skill write. A create base is an explicit absent
+  snapshot. This makes publication and rollback restart-recoverable without model
+  output.
+- **Completed:** Added package-level mutation to `SkillMutationService`: full-package
+  SkillScan, bounded moderation of Proposal files plus mandatory `SKILL.md` and every
+  executable, safe support-path validation, base `SKILL.md` hash CAS, complete package
+  hash CAS, one storage-lock directory exchange, history, projection rebuild, and
+  prompt-cache refresh.
+- **Completed:** Storage stages the complete candidate beside the target, moves the
+  old package to a hidden backup under the projection lock, and restores that backup
+  on candidate rename, permission repair, or history-write failure. Create and delete
+  use the same package operation.
+- **Completed:** `SkillPublicationService.publish()` accepts only non-expired approved
+  create/patch Proposals. It persists preflighted snapshots, reserves publication,
+  writes through the mutation service, captures the actual published package, records
+  base/published Skill and package hashes, and finalizes both Store records.
+- **Completed:** `rollback()` reads only the persisted base snapshot. It reruns full
+  SkillScan and mandatory executable moderation, requires the live package to match
+  the published hash, atomically restores every file and execution bit (or deletes a
+  newly created Skill), appends `evolution_rollback` history, and records reviewer
+  identity.
+- **Completed:** Identical publication/rollback retries are idempotent. If process
+  exit occurs after the package or publication row commits but before Proposal state,
+  the next call recognizes the exact snapshot and repairs the remaining status
+  transition without rerunning mutation.
+- **Completed:** Added per-user `skill_evolution_publications` SQL persistence and
+  Alembic revision `0013_skill_publications`; fresh, 0011-chain, and direct 0012
+  upgrades are covered. No config schema change was required.
+- **Evidence:** Eleven publication tests and the mutation/Store/migration suites pass
+  with 56 focused tests. Skill evolution/mutation/config regression passes with 292
+  tests and one skip; bootstrap/migration regression passes with 36 tests.
+- **Evidence:** The complete backend offline suite passes with 11,509 tests and 77
+  skips.
+- **Evidence:** Bypassing full-package SkillScan caused
+  `test_rollback_security_failure_preserves_published_package` to fail because unsafe
+  rollback content was restored. Restoring the scan returned the test to green.
+- **Boundary:** Publication and rollback are explicit service calls only. Phase 8
+  still must coordinate the full background pipeline, and Phase 9 must expose
+  ownership/authz/CSRF-protected approval, publication, and rollback APIs. No worker
+  automatically publishes a Skill.
+
+### 2026-08-17 — Phase 8 Task 8.1 / Durable Evolution Coordinator
+
+- **Decision:** One redacted run snapshot maps to one deterministic
+  `skill-evolution-pipeline-v1` job. Its idempotency key hashes user, run, snapshot,
+  and pipeline version; duplicate run finalization returns the existing mutable job
+  rather than creating duplicate evidence.
+- **Decision:** Job state is `pending -> running -> completed`, with `retry` and
+  terminal `dead` branches. Every claim receives a unique token, expiry, incremented
+  attempt count, and revision. Completion, retry, and lease renewal require that
+  token plus revision CAS, so an expired worker cannot overwrite a recovery worker.
+- **Decision:** The bounded `asyncio.Queue` contains wake-up hints only. Enqueue
+  commits the SQL/memory Store row first; queue saturation is ignored because the
+  periodic database poll recovers pending, due-retry, and expired-running rows.
+- **Decision:** The production background processor advances verification,
+  eligibility, deterministic pre-extraction, strict structured extraction,
+  deterministic/semantic grouping, strict K=3 confirmation, and new/Patch Proposal
+  distillation. It stops at `staged`: production Replay-suite assembly and an
+  isolated `ReplayRuntime` adapter are still absent, so no evaluation is fabricated.
+- **Decision:** The coordinator never invokes approval, publication, rollback, or
+  Skill mutation. Those operations remain explicit trusted services and retain the
+  Phase 7 security/CAS boundaries.
+- **Completed:** Added immutable `EvolutionJob`, Memory/SQL Store operations, indexed
+  `skill_evolution_jobs`, and Alembic `0014_skill_evolution_jobs`. Fresh databases and
+  upgrades from 0011, 0012, and 0013 are covered.
+- **Completed:** Added renewable lease execution, deterministic exponential backoff,
+  bounded exception-class error codes, max-attempt dead state, startup recovery,
+  bounded local concurrency, and configured shutdown drain/cancellation recovery.
+- **Completed:** Added process-local striped Cluster continuation. A restart that
+  finds a persisted ready Cluster without a completed Proposal resumes distillation;
+  a losing cross-worker Cluster CAS leaves continuation to the winner's durable job.
+- **Completed:** Run finalization now awaits durable enqueue only after terminal
+  status and the redacted trace are persisted. Trace/enqueue/coordinator failures are
+  separately caught and cannot change the completed user run result.
+- **Completed:** Gateway lifecycle creates a shared evolution Store and processor,
+  starts the coordinator when evolution is enabled at startup, and stops it before
+  database teardown. Enqueues received after local stop remain durable for restart.
+- **Completed:** Added `skill_evolution.coordinator` operational settings and bumped
+  example/local config from version 43 to 44.
+- **Evidence:** Durable Store/coordinator/pipeline/worker tests cover idempotent
+  enqueue, queue saturation, exclusive claims, stale claim rejection, lease renewal,
+  retry due times, dead state, SQL recreation, startup recovery, shutdown drain,
+  timeout recovery, snapshot identity, extraction restart idempotency, and non-fatal
+  run enqueue failure.
+- **Evidence:** Phase 8.1 plus migration/bootstrap/Gateway focused regression passes
+  with 130 tests. Skill evolution and mutation regression passes with 288 tests and
+  one skip.
+- **Evidence:** The complete backend offline suite passes with 11,537 tests, 77
+  skips, and 39 warnings.
+- **Boundary:** Phase 8.2 still owns lifecycle event/metric observability. Phase 9
+  owns authenticated read, review, publication, and rollback APIs. Replay suite
+  synthesis and a production isolated runtime adapter must be completed before the
+  background processor can evaluate a staged Proposal.
+
+### 2026-08-17 — Phase 8 Task 8.2 / Content-Free Observability
+
+- **Decision:** `deerflow.skill-evolution.observation.v1` is a strict structured
+  event schema. It permits only lifecycle kind/stage, reason codes, bounded counts,
+  run/job/event/Cluster/Proposal/evaluation/publication IDs, snapshot hashes, and
+  SHA-256 hashes of user identity and Skill name. It has no free-text content,
+  exception text, task input, model output, file path, or Proposal body field.
+- **Decision:** Lifecycle records are process-local observability, not a second
+  domain Store. They are written as structured INFO logs and retained in a bounded
+  recent-event ring for later exporters/API integration. Deterministic observation
+  IDs suppress same-process retry duplicates; domain durability remains in the
+  existing event/Cluster/Proposal/evaluation/publication/job tables.
+- **Decision:** Metrics are fixed-name, low-cardinality process aggregates. No user,
+  Skill, task family, model output, reason text, or exception is a metric label.
+  Distributions support bounded deduplication keys so job retries do not resample the
+  same Cluster revision or evaluation.
+- **Decision:** `proposal_pass_rate` is approved evaluations divided by all persisted
+  evaluations. `publication_rate` is newly published versions divided by newly
+  distilled Proposals observed in the process. `quality_lift` is the v1
+  `success_lift` raw dimension; `regression_rate` is the v1 regression-resistance raw
+  dimension; Cluster purity is confirmed members over all considered candidates.
+- **Completed:** Added lifecycle kinds `admitted`, `rejected`, `extracted`,
+  `clustered`, `ready`, `distilled`, `evaluated`, `approved`, `published`, and
+  `rolled_back`, with one `rejected` kind differentiated by its fixed stage.
+- **Completed:** Added durable backlog and active-worker gauges, extraction-failure
+  counter, lifecycle counters, proposal/publication rates, and bounded
+  Cluster-purity/regression/quality-lift distributions.
+- **Completed:** Coordinator polls Memory/SQL job counts for `pending + retry`
+  durable queue depth. Queue metrics are not derived from the wake-up hint queue.
+- **Completed:** Pipeline emits admission/rejection, extraction, grouping,
+  confirmation/readiness, and distillation events. A real three-independent-run test
+  proves `ready -> distilled` after K=3.
+- **Completed:** Both replay evaluators emit once after evaluation persistence and
+  sample quality/regression metrics. Approval emits only after status CAS.
+  Publication/rollback emit only after publication-row CAS; failed publication emits
+  a content-free rejection reason code.
+- **Completed:** Gateway owns the process observer on `app.state` and passes the same
+  instance to coordinator and pipeline. Explicit evaluators, approval policies, and
+  publication services default to that same process singleton.
+- **Completed:** All observer calls use fail-open wrappers. Wrapper warnings include
+  only operation, fixed metric name, lifecycle kind, and stage; the original
+  exception message and traceback are deliberately omitted.
+- **Completed:** No config schema or persistence schema changed; config remains
+  version 44 and Alembic head remains `0014_skill_evolution_jobs`.
+- **Evidence:** Observability, Skill evolution, mutation, and Gateway lifespan
+  focused regression passes with 313 tests and one skip. Ruff and diff whitespace
+  checks pass.
+- **Evidence:** The complete backend offline suite passes with 11,550 tests, 77
+  skips, and 39 warnings.
+- **Boundary:** Metrics reset on process restart and no `/metrics` or read API is
+  added in this task because the repository has no generic Prometheus exporter
+  infrastructure. Phase 9 may expose compact owner/admin-safe snapshots; a future
+  deployment exporter can consume the fixed snapshot without changing lifecycle
+  producers.
+
 ## 14. Final Completion Criteria
 
 The non-RL project is complete when:
@@ -1367,9 +1739,11 @@ The non-RL project is complete when:
 - eligible trajectories become validated structured events;
 - three independent same-family events produce a staged skill proposal;
 - both new-skill and existing-skill update branches work;
-- proposals are replayed against source and held-out tasks;
-- unsafe or regressive proposals are rejected;
-- approved proposals publish to per-user custom storage with version history;
+- evaluated modes can replay proposals against source and held-out tasks and reject
+  unsafe or regressive candidates;
+- direct mode can publish staged proposals without Evaluation or approval;
+- approved or explicitly direct proposals publish to per-user custom storage with
+  version history;
 - rollback works;
 - online runs remain unaffected by evolution worker failures;
 - experiments demonstrate the effect of multi-trajectory aggregation against the

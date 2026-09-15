@@ -291,6 +291,8 @@ async def test_patch_distillation_preserves_unaffected_content() -> None:
     assert proposal is not None
     assert proposal.operation is ProposalOperation.patch
     assert proposal.status is ProposalStatus.staged
+    assert proposal.expires_at is not None
+    assert (proposal.expires_at - proposal.created_at).days == 180
     assert proposal.skill_name == "package-repair"
     assert proposal.base_skill_hash == target_hash
     assert proposal.source_skill_hashes == [target_hash]

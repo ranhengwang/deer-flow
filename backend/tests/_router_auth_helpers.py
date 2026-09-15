@@ -48,6 +48,10 @@ _STUB_PERMISSIONS: list[str] = [
     Permissions.RUNS_CREATE,
     Permissions.RUNS_READ,
     Permissions.RUNS_CANCEL,
+    Permissions.SKILL_EVOLUTION_READ,
+    Permissions.SKILL_EVOLUTION_REVIEW,
+    Permissions.SKILL_EVOLUTION_PUBLISH,
+    Permissions.SKILL_EVOLUTION_ROLLBACK,
 ]
 
 

@@ -155,6 +155,35 @@ def test_get_skills_prompt_section_includes_self_evolution_rules_without_skills(
     assert "Skill Self-Evolution" in result
 
 
+def test_direct_publication_omits_active_self_evolution_rules(monkeypatch):
+    skills = [_make_skill("skill1")]
+    storage = SimpleNamespace(load_skills=lambda *, enabled_only: skills)
+    monkeypatch.setattr(
+        "deerflow.agents.lead_agent.prompt.get_or_new_skill_storage",
+        lambda **kwargs: storage,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.lead_agent.prompt.get_or_new_user_skill_storage",
+        lambda user_id, **kwargs: storage,
+    )
+    config = SimpleNamespace(
+        skills=SimpleNamespace(container_path="/mnt/skills"),
+        skill_evolution=SimpleNamespace(
+            enabled=True,
+            publication=SimpleNamespace(mode="direct"),
+        ),
+    )
+
+    result = get_skills_prompt_section(
+        available_skills=None,
+        app_config=config,
+    )
+
+    assert "skill1" in result
+    assert "Skill Self-Evolution" not in result
+    assert "skill_manage" not in result
+
+
 def test_get_skills_prompt_section_cache_respects_skill_evolution_toggle(monkeypatch):
     skills = [_make_skill("skill1")]
     monkeypatch.setattr("deerflow.agents.lead_agent.prompt._get_enabled_skills", lambda: skills)

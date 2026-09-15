@@ -8,12 +8,16 @@ import json
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Literal, Protocol, Self
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import Field, ValidationError, model_validator
 
 from deerflow.config.app_config import AppConfig
+from deerflow.skill_evolution.approval import (
+    DEFAULT_PROPOSAL_TTL_DAYS,
+)
 from deerflow.skill_evolution.distiller import (
     DistillationModel,
 )
@@ -562,6 +566,10 @@ def _build_proposal(
         source_skill_hashes=[source_skill_hash],
         status=ProposalStatus.staged,
         created_at=cluster.updated_at,
+        expires_at=cluster.updated_at
+        + timedelta(
+            days=DEFAULT_PROPOSAL_TTL_DAYS,
+        ),
     )
 
 

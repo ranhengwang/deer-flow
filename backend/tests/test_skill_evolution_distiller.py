@@ -226,6 +226,8 @@ async def test_ready_cluster_distills_complete_staged_create_proposal() -> None:
     assert proposal is not None
     assert proposal.operation is ProposalOperation.create
     assert proposal.status is ProposalStatus.staged
+    assert proposal.expires_at is not None
+    assert (proposal.expires_at - proposal.created_at).days == 180
     assert proposal.skill_name == "python-package-install"
     assert proposal.base_skill_hash is None
     assert proposal.supporting_event_ids == [
@@ -322,6 +324,38 @@ async def test_supporting_file_requires_repeated_distinct_run_evidence() -> None
     assert proposal is not None
     assert [item.path for item in proposal.proposed_files] == ["SKILL.md"]
     assert len(model.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_invalid_optional_supporting_file_path_is_discarded() -> None:
+    events = [_event(1), _event(2), _event(3)]
+    runtime_file = {
+        "path": "/mnt/user-data/workspace/test_normalize_config.py",
+        "purpose": "Reuse the source task's test file.",
+        "content": "def test_normalize_config():\n    pass\n",
+        "executable": False,
+        "evidence_event_ids": ["event-1", "event-2"],
+    }
+    model = _FakeModel(
+        [
+            _output(supporting_files=[runtime_file]),
+        ]
+    )
+    distiller = NewSkillDistiller(
+        model=model,
+        model_name="distill-model",
+        max_attempts=1,
+        retry_delay_seconds=0,
+    )
+
+    proposal = await distiller.distill(
+        _ready_cluster(events),
+        events,
+    )
+
+    assert proposal is not None
+    assert [item.path for item in proposal.proposed_files] == ["SKILL.md"]
+    assert len(model.calls) == 1
 
 
 @pytest.mark.asyncio

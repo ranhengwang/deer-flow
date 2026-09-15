@@ -223,6 +223,56 @@ async def test_valid_new_skill_output_builds_and_persists_event() -> None:
 
 
 @pytest.mark.anyio
+async def test_new_skill_output_discards_patch_only_fields() -> None:
+    output = _new_skill_output()
+    output["candidate_target"] = {
+        "name": "invented-target",
+        "content_hash": "none",
+    }
+    output["candidate_target_evidence_segment_ids"] = ["tool:call-inspect"]
+    output["skill_gaps"] = [
+        {
+            "category": SkillGapCategory.missing_prerequisite.value,
+            "evidence": "A target Skill should be updated.",
+            "recommended_change": "Patch the target Skill.",
+            "evidence_segment_ids": ["tool:call-inspect"],
+        }
+    ]
+    extractor = StructuredEvolutionExtractor(
+        model=SequenceModel([output]),
+        model_name="qwen3-local",
+        max_attempts=1,
+        retry_delay_seconds=0,
+    )
+
+    event = await extractor.extract(_pre_extraction())
+
+    assert event is not None
+    assert event.event_kind is EvolutionEventKind.new_skill_evidence
+    assert event.target_skill is None
+    assert event.skill_gaps == []
+
+
+@pytest.mark.anyio
+async def test_optional_claims_without_typed_evidence_are_discarded() -> None:
+    output = _new_skill_output()
+    output["failed_attempts"][0]["evidence_segment_ids"] = ["tool:call-inspect"]
+    output["user_corrections"][0]["evidence_segment_ids"] = ["tool:call-inspect"]
+    extractor = StructuredEvolutionExtractor(
+        model=SequenceModel([output]),
+        model_name="qwen3-local",
+        max_attempts=1,
+        retry_delay_seconds=0,
+    )
+
+    event = await extractor.extract(_pre_extraction())
+
+    assert event is not None
+    assert event.failed_attempts == []
+    assert event.user_corrections == []
+
+
+@pytest.mark.anyio
 async def test_valid_patch_output_selects_observed_skill() -> None:
     pre_extraction = _pre_extraction(with_skill=True)
     model = SequenceModel([_patch_output()])

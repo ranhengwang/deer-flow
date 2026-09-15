@@ -29,9 +29,12 @@ from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
 from deerflow.persistence.skill_evolution.model import (
     SkillEvolutionClusterRow,
+    SkillEvolutionCreditRow,
     SkillEvolutionEvaluationRow,
     SkillEvolutionEventRow,
+    SkillEvolutionJobRow,
     SkillEvolutionProposalRow,
+    SkillEvolutionPublicationRow,
 )
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.user.model import UserRow
@@ -50,8 +53,11 @@ __all__ = [
     "ScheduledTaskRow",
     "ScheduledTaskRunRow",
     "SkillEvolutionClusterRow",
+    "SkillEvolutionCreditRow",
     "SkillEvolutionEventRow",
     "SkillEvolutionEvaluationRow",
+    "SkillEvolutionJobRow",
+    "SkillEvolutionPublicationRow",
     "SkillEvolutionProposalRow",
     "ThreadMetaRow",
     "UserRow",
